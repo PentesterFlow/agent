@@ -1,7 +1,7 @@
 #!/bin/sh
 # pentesterflow online installer (macOS / Linux).
 #
-#   curl -fsSL https://raw.githubusercontent.com/pentesterflow/agent/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/PentesterFlow/agent/main/install.sh | sh
 #
 # Downloads the standalone binary for your OS/arch from the latest GitHub
 # release, verifies its SHA-256, and installs it to ~/.local/bin.
@@ -11,7 +11,7 @@
 #   PENTESTERFLOW_INSTALL_DIR=/path   install location (default: ~/.local/bin)
 set -eu
 
-REPO="pentesterflow/agent"
+REPO="${PENTESTERFLOW_REPO:-PentesterFlow/agent}"
 BIN="pentesterflow"
 
 info() { printf '%s\n' "$*" >&2; }
@@ -22,11 +22,11 @@ err() {
 
 # --- downloader (curl or wget) -------------------------------------------
 if command -v curl >/dev/null 2>&1; then
-  dl() { curl -fsSL "$1" -o "$2"; }
-  dl_stdout() { curl -fsSL "$1"; }
+  dl() { curl -fL --proto '=https' --tlsv1.2 -sS "$1" -o "$2"; }
+  dl_stdout() { curl -fL --proto '=https' --tlsv1.2 -sS "$1"; }
 elif command -v wget >/dev/null 2>&1; then
-  dl() { wget -qO "$2" "$1"; }
-  dl_stdout() { wget -qO- "$1"; }
+  dl() { wget -q -O "$2" "$1"; }
+  dl_stdout() { wget -q -O- "$1"; }
 else
   err "need either curl or wget installed"
 fi
@@ -49,6 +49,11 @@ esac
 asset="${BIN}-${os}-${arch}"
 
 ver="${PENTESTERFLOW_VERSION:-latest}"
+case "$ver" in
+  latest | v*) ;;
+  [0-9]*) ver="v${ver}" ;;
+esac
+
 if [ "$ver" = "latest" ]; then
   base="https://github.com/${REPO}/releases/latest/download"
 else
@@ -61,6 +66,7 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 # --- download -------------------------------------------------------------
 info "downloading ${asset} (${ver})..."
 dl "${base}/${asset}" "${tmp}/${asset}" || err "download failed: ${base}/${asset}"
+[ -s "${tmp}/${asset}" ] || err "downloaded asset is empty: ${base}/${asset}"
 
 # --- verify checksum (best-effort) ---------------------------------------
 if dl_stdout "${base}/SHA256SUMS" >"${tmp}/SHA256SUMS" 2>/dev/null && [ -s "${tmp}/SHA256SUMS" ]; then
@@ -76,30 +82,47 @@ if dl_stdout "${base}/SHA256SUMS" >"${tmp}/SHA256SUMS" 2>/dev/null && [ -s "${tm
     if [ -n "$got" ] && [ "$got" != "$want" ]; then
       err "checksum mismatch for ${asset} (expected ${want}, got ${got})"
     fi
-    [ -n "$got" ] && info "checksum ok"
+    if [ -n "$got" ]; then
+      info "checksum ok"
+    else
+      info "warning: no SHA-256 tool found — skipping checksum verification"
+    fi
+  else
+    info "warning: SHA256SUMS does not contain ${asset} — skipping checksum verification"
   fi
 else
   info "warning: SHA256SUMS unavailable — skipping checksum verification"
 fi
 
 # --- install --------------------------------------------------------------
-dir="${PENTESTERFLOW_INSTALL_DIR:-$HOME/.local/bin}"
+if [ -n "${PENTESTERFLOW_INSTALL_DIR:-}" ]; then
+  dir="$PENTESTERFLOW_INSTALL_DIR"
+else
+  [ -n "${HOME:-}" ] || err "HOME is not set; set PENTESTERFLOW_INSTALL_DIR explicitly"
+  dir="$HOME/.local/bin"
+fi
+
 mkdir -p "$dir"
 chmod 0755 "${tmp}/${asset}"
-mv -f "${tmp}/${asset}" "${dir}/${BIN}"
+dest="${dir}/${BIN}"
+staged="${dir}/.${BIN}.tmp.$$"
+rm -f "$staged"
+cp "${tmp}/${asset}" "$staged" || err "failed to stage binary in ${dir}"
+chmod 0755 "$staged"
+mv -f "$staged" "$dest" || err "failed to install binary to ${dest}"
 
 # macOS: drop the quarantine attribute so Gatekeeper doesn't block the
 # unsigned binary on first run.
 if [ "$os" = darwin ] && command -v xattr >/dev/null 2>&1; then
-  xattr -d com.apple.quarantine "${dir}/${BIN}" 2>/dev/null || true
+  xattr -d com.apple.quarantine "$dest" 2>/dev/null || true
 fi
 
-info "installed ${BIN} -> ${dir}/${BIN}"
+info "installed ${BIN} -> ${dest}"
 
-case ":${PATH}:" in
+case ":${PATH:-}:" in
   *":${dir}:"*) : ;;
   *) info "note: ${dir} is not on your PATH — add this to your shell profile:
     export PATH=\"${dir}:\$PATH\"" ;;
 esac
 
-"${dir}/${BIN}" --version 2>/dev/null || info "run '${BIN} --help' to get started"
+"$dest" --version 2>/dev/null || info "run '${BIN} --help' to get started"
