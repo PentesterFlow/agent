@@ -65,6 +65,65 @@ beforeAll(async () => {
         return;
       }
 
+      if (body.model === 'content-json-tool-call') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            message: {
+              role: 'assistant',
+              content: JSON.stringify({
+                name: 'http',
+                arguments: { method: 'GET', url: 'https://x.example.com' },
+              }),
+            },
+            done: true,
+          }),
+        );
+        return;
+      }
+
+      if (body.model === 'content-fenced-tool-calls') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            message: {
+              role: 'assistant',
+              content: `\`\`\`json
+${JSON.stringify({
+  tool_calls: [
+    {
+      function: {
+        name: 'http',
+        arguments: '{"url":"https://x.example.com/a","method":"POST"}',
+      },
+    },
+  ],
+})}
+\`\`\``,
+            },
+            done: true,
+          }),
+        );
+        return;
+      }
+
+      if (body.model === 'streaming-content-json-tool-call') {
+        res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+        res.write(
+          `${JSON.stringify({ message: { role: 'assistant', content: '{"name":"http",' } })}\n`,
+        );
+        res.write(
+          `${JSON.stringify({
+            message: {
+              role: 'assistant',
+              content: '"arguments":{"url":"https://x.example.com/stream"}}',
+            },
+            done: true,
+          })}\n`,
+        );
+        return;
+      }
+
       // Default non-streaming response.
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
@@ -119,6 +178,91 @@ describe('OllamaClient', () => {
     );
     expect(deltas.join('')).toBe('hi there');
     expect(out.message.content).toBe('hi there');
+  });
+
+  it('non-streaming parses JSON content tool calls for Ollama models that do not emit native tool_calls', async () => {
+    const c = new OllamaClient(baseURL, 'content-json-tool-call');
+    const out = await c.chat({
+      model: 'content-json-tool-call',
+      messages: [{ role: 'user', content: 'fetch it' }],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'http', description: 'http tool', parameters: {} },
+        },
+      ],
+    });
+
+    expect(out.message.toolCalls).toHaveLength(1);
+    expect(out.message.toolCalls?.[0]?.function.name).toBe('http');
+    expect(out.message.toolCalls?.[0]?.function.arguments).toBe(
+      '{"method":"GET","url":"https://x.example.com"}',
+    );
+    expect(out.finishReason).toBe('tool_calls');
+  });
+
+  it('non-streaming parses fenced tool_calls content with string arguments', async () => {
+    const c = new OllamaClient(baseURL, 'content-fenced-tool-calls');
+    const out = await c.chat({
+      model: 'content-fenced-tool-calls',
+      messages: [{ role: 'user', content: 'fetch it' }],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'http', description: 'http tool', parameters: {} },
+        },
+      ],
+    });
+
+    expect(out.message.toolCalls).toHaveLength(1);
+    expect(out.message.toolCalls?.[0]?.function.name).toBe('http');
+    expect(out.message.toolCalls?.[0]?.function.arguments).toBe(
+      '{"url":"https://x.example.com/a","method":"POST"}',
+    );
+  });
+
+  it('streaming parses JSON content tool calls when native tool_calls are absent', async () => {
+    const c = new OllamaClient(baseURL, 'streaming-content-json-tool-call');
+    const deltas: string[] = [];
+    const out = await c.chatStream(
+      {
+        model: 'streaming-content-json-tool-call',
+        messages: [{ role: 'user', content: 'fetch it' }],
+        tools: [
+          {
+            type: 'function',
+            function: { name: 'http', description: 'http tool', parameters: {} },
+          },
+        ],
+      },
+      (d) => deltas.push(d),
+    );
+
+    expect(deltas.join('')).toBe(
+      '{"name":"http","arguments":{"url":"https://x.example.com/stream"}}',
+    );
+    expect(out.message.toolCalls).toHaveLength(1);
+    expect(out.message.toolCalls?.[0]?.function.arguments).toBe(
+      '{"url":"https://x.example.com/stream"}',
+    );
+    expect(out.finishReason).toBe('tool_calls');
+  });
+
+  it('does not execute JSON content for unknown tools', async () => {
+    const c = new OllamaClient(baseURL, 'content-json-tool-call');
+    const out = await c.chat({
+      model: 'content-json-tool-call',
+      messages: [{ role: 'user', content: 'fetch it' }],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'shell', description: 'shell tool', parameters: {} },
+        },
+      ],
+    });
+
+    expect(out.message.toolCalls).toBeUndefined();
+    expect(out.finishReason).toBe('stop');
   });
 
   it('ping succeeds against a live server', async () => {

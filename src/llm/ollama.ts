@@ -77,7 +77,7 @@ export class OllamaClient implements Client, StreamingClient, Pinger {
       throw classifyBackend('ollama', null, resp.status, raw);
     }
     const parsed = JSON.parse(raw) as OllamaChatResp;
-    return this.assembleResponse(parsed.message ?? { role: 'assistant', content: '' });
+    return this.assembleResponse(parsed.message ?? { role: 'assistant', content: '' }, req.tools);
   }
 
   async chatStream(
@@ -137,7 +137,7 @@ export class OllamaClient implements Client, StreamingClient, Pinger {
       if (chunk.done) break;
     }
 
-    return this.assembleResponse({ role: 'assistant', content, tool_calls: toolCalls }, true);
+    return this.assembleResponse({ role: 'assistant', content, tool_calls: toolCalls }, req.tools);
   }
 
   private encodeRequest(req: ChatRequest, stream: boolean) {
@@ -172,10 +172,17 @@ export class OllamaClient implements Client, StreamingClient, Pinger {
     };
   }
 
-  private assembleResponse(msg: OllamaMessage, _streamed = false): ChatResponse {
+  private assembleResponse(msg: OllamaMessage, tools?: ChatRequest['tools']): ChatResponse {
     const out: Message = { role: 'assistant', content: msg.content ?? '' };
-    if (msg.tool_calls?.length) {
-      out.toolCalls = msg.tool_calls.map<ToolCall>((tc) => ({
+    const toolCalls = msg.tool_calls?.length
+      ? msg.tool_calls
+      : parseContentToolCalls(
+          msg.content ?? '',
+          new Set((tools ?? []).map((t) => t.function.name)),
+        );
+
+    if (toolCalls.length) {
+      out.toolCalls = toolCalls.map<ToolCall>((tc) => ({
         id: newCallID(),
         type: 'function',
         function: {
@@ -189,6 +196,121 @@ export class OllamaClient implements Client, StreamingClient, Pinger {
       finishReason: out.toolCalls?.length ? 'tool_calls' : 'stop',
     };
   }
+}
+
+function parseContentToolCalls(content: string, knownTools: Set<string>): OllamaToolCall[] {
+  if (knownTools.size === 0) return [];
+
+  const parsed = parseJSONFromContent(content);
+  if (parsed === undefined) return [];
+
+  return normalizeToolCalls(parsed, knownTools);
+}
+
+function parseJSONFromContent(content: string): unknown {
+  const trimmed = content.trim();
+  if (!trimmed) return undefined;
+
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const candidate = fenced?.[1]?.trim() ?? trimmed;
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    const sliced = sliceFirstJSONValue(candidate);
+    if (!sliced) return undefined;
+    try {
+      return JSON.parse(sliced);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function sliceFirstJSONValue(input: string): string | undefined {
+  const start = input.search(/[\[{]/);
+  if (start < 0) return undefined;
+
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < input.length; i += 1) {
+    const ch = input[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') stack.push('}');
+    if (ch === '[') stack.push(']');
+    if (ch === '}' || ch === ']') {
+      if (stack.pop() !== ch) return undefined;
+      if (stack.length === 0) return input.slice(start, i + 1);
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeToolCalls(value: unknown, knownTools: Set<string>): OllamaToolCall[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => normalizeToolCalls(item, knownTools));
+  }
+  if (!isRecord(value)) return [];
+
+  const calls = value.tool_calls ?? value.toolCalls;
+  if (Array.isArray(calls)) {
+    return calls.flatMap((item) => normalizeToolCalls(item, knownTools));
+  }
+
+  const functionValue = value.function;
+  if (isRecord(functionValue)) {
+    const call = normalizeNamedCall(functionValue.name, functionValue.arguments, knownTools);
+    return call ? [call] : [];
+  }
+
+  const name = value.name ?? value.tool ?? value.tool_name ?? value.toolName;
+  const args = value.arguments ?? value.args ?? value.parameters ?? value.input ?? {};
+  const call = normalizeNamedCall(name, args, knownTools);
+  return call ? [call] : [];
+}
+
+function normalizeNamedCall(
+  nameValue: unknown,
+  argsValue: unknown,
+  knownTools: Set<string>,
+): OllamaToolCall | undefined {
+  if (typeof nameValue !== 'string' || !knownTools.has(nameValue)) return undefined;
+
+  let args: unknown = argsValue;
+  if (typeof args === 'string') {
+    try {
+      args = JSON.parse(args);
+    } catch {
+      args = {};
+    }
+  }
+  const argsRecord = isRecord(args) ? args : {};
+
+  return {
+    function: {
+      name: nameValue,
+      arguments: argsRecord,
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 /** Decode a byte stream into newline-delimited string chunks. */
