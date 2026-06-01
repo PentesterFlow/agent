@@ -35,7 +35,7 @@
     "offensive-security",
     "red-team"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "homepage": "https://github.com/pentesterflow/agent",
   "repository": {
     "type": "git",

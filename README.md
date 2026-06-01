@@ -12,7 +12,7 @@ recon, vulnerability testing, verification, and report-ready findings.
 [![build](https://img.shields.io/github/actions/workflow/status/PentesterFlow/agent/ci.yml?branch=main&label=build&logo=github)](https://github.com/PentesterFlow/agent/actions)
 [![release](https://img.shields.io/github/v/release/PentesterFlow/agent?include_prereleases&logo=github)](https://github.com/PentesterFlow/agent/releases)
 [![node](https://img.shields.io/badge/node-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![license: Apache--2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![stars](https://img.shields.io/github/stars/PentesterFlow/agent?style=social)](https://github.com/PentesterFlow/agent/stargazers)
 
 **[Install](#install) · [Quickstart](#quickstart) · [Core](#core) · [Usage](#usage) · [Skills](#skills) · [Security](#security-model)**
@@ -292,7 +292,7 @@ skills should include a `SKILL.md` and pass the skill conformance tests.
 
 ## License
 
-[MIT](LICENSE). Use responsibly and only with authorization.
+[Apache-2.0](LICENSE). Use responsibly and only with authorization.
 
 <div align="center">
 <br/>
