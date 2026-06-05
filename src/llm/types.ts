@@ -13,6 +13,11 @@ export interface ToolCall {
   id: string;
   type: 'function';
   function: FunctionCall;
+  provider?: {
+    gemini?: {
+      thoughtSignature?: string;
+    };
+  };
 }
 
 export interface Message {

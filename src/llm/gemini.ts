@@ -5,6 +5,8 @@ import type { ChatRequest, ChatResponse, Message, ToolSpec } from './types.js';
 
 interface GeminiPart {
   text?: string;
+  thoughtSignature?: string;
+  thought_signature?: string;
   functionCall?: {
     name?: string;
     args?: Record<string, unknown>;
@@ -90,19 +92,24 @@ export class GeminiClient implements Client, Pinger {
       .map((p) => p.text ?? '')
       .filter(Boolean)
       .join('');
-    const calls = parts
-      .map((p) => p.functionCall)
-      .filter((fc): fc is NonNullable<GeminiPart['functionCall']> => Boolean(fc?.name));
+    const calls = parts.filter((p) => Boolean(p.functionCall?.name));
     const msg: Message = { role: 'assistant', content: text };
     if (calls.length > 0) {
-      msg.toolCalls = calls.map((fc) => ({
-        id: newCallID(),
-        type: 'function',
-        function: {
-          name: fc.name ?? '',
-          arguments: JSON.stringify(fc.args ?? {}),
-        },
-      }));
+      msg.toolCalls = calls.map((part) => {
+        const fc = part.functionCall;
+        const thoughtSignature = part.thoughtSignature ?? part.thought_signature;
+        return {
+          id: newCallID(),
+          type: 'function',
+          function: {
+            name: fc?.name ?? '',
+            arguments: JSON.stringify(fc?.args ?? {}),
+          },
+          ...(thoughtSignature
+            ? { provider: { gemini: { thoughtSignature } } }
+            : {}),
+        };
+      });
     }
     return { message: msg, finishReason: choice.finishReason ?? '' };
   }
@@ -152,7 +159,12 @@ function encodeMessage(m: Message): GeminiContent[] {
       } catch {
         args = {};
       }
-      parts.push({ functionCall: { name: tc.function.name, args } });
+      parts.push({
+        functionCall: { name: tc.function.name, args },
+        ...(tc.provider?.gemini?.thoughtSignature
+          ? { thoughtSignature: tc.provider.gemini.thoughtSignature }
+          : {}),
+      });
     }
     return parts.length > 0 ? [{ role: 'model', parts }] : [];
   }

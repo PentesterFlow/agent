@@ -36,7 +36,10 @@ beforeAll(async () => {
               content: {
                 parts: [
                   { text: 'working' },
-                  { functionCall: { name: 'http', args: { url: 'https://example.com' } } },
+                  {
+                    functionCall: { name: 'http', args: { url: 'https://example.com' } },
+                    thoughtSignature: 'sig-http',
+                  },
                 ],
               },
               finishReason: 'STOP',
@@ -71,6 +74,7 @@ describe('GeminiClient', () => {
               id: 'call_1',
               type: 'function',
               function: { name: 'grep', arguments: '{"pattern":"x"}' },
+              provider: { gemini: { thoughtSignature: 'sig-grep' } },
             },
           ],
         },
@@ -97,7 +101,13 @@ describe('GeminiClient', () => {
     expect(out.message.content).toBe('working');
     expect(out.message.toolCalls?.[0]?.function.name).toBe('http');
     expect(out.message.toolCalls?.[0]?.function.arguments).toBe('{"url":"https://example.com"}');
+    expect(out.message.toolCalls?.[0]?.provider?.gemini?.thoughtSignature).toBe('sig-http');
     expect(lastBody?.systemInstruction).toEqual({ parts: [{ text: 'system prompt' }] });
+    const contents = lastBody?.contents as Array<{
+      role: string;
+      parts: Array<Record<string, unknown>>;
+    }>;
+    expect(contents[1]?.parts[0]?.thoughtSignature).toBe('sig-grep');
     const tools = lastBody?.tools as Array<{
       functionDeclarations: Array<Record<string, unknown>>;
     }>;
