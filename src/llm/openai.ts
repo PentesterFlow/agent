@@ -9,6 +9,7 @@
 import type { Client, Pinger, StreamingClient } from './client.js';
 import { classifyBackend } from './errors.js';
 import { newCallID } from './ids.js';
+import { kimiLocksTemperature, kimiSupportsThinkingToggle } from './providers.js';
 import type { ChatRequest, ChatResponse, Message, ToolCall } from './types.js';
 
 interface OAIToolCallFragment {
@@ -41,8 +42,13 @@ interface OAIChatResp {
 
 interface OAIStreamResp {
   choices?: Array<{
-    delta: {
+    delta?: {
       content?: string;
+      // Reasoning models (kimi-k2.*, deepseek-reasoner, ...) stream their
+      // chain-of-thought here before any `content`. We surface it so the UI
+      // shows progress instead of a frozen spinner, but keep it OUT of the
+      // returned message so it never re-enters the model's history.
+      reasoning_content?: string;
       tool_calls?: OAIToolCallFragment[];
     };
     finish_reason?: string;
@@ -63,18 +69,32 @@ const LMSTUDIO_STOP_TOKENS = [
   '<|im_start|>',
   '<|endoftext|>',
 ];
+const CHAT_TIMEOUT_MS = 10 * 60 * 1000;
 
 export class OpenAIClient implements Client, StreamingClient, Pinger {
   readonly baseURL: string;
   readonly apiKey: string;
   readonly modelID: string;
   readonly label: string;
+  private readonly extraHeaders: Record<string, string>;
+  private readonly temperature?: number;
+  private readonly maxTokens?: number;
 
-  constructor(baseURL: string, apiKey: string, model: string, label = 'openai-compat') {
+  constructor(
+    baseURL: string,
+    apiKey: string,
+    model: string,
+    label = 'openai-compat',
+    extraHeaders: Record<string, string> = {},
+    genOpts: { temperature?: number; maxTokens?: number } = {},
+  ) {
     this.baseURL = baseURL;
     this.apiKey = apiKey;
     this.modelID = model;
     this.label = label;
+    this.extraHeaders = extraHeaders;
+    this.temperature = genOpts.temperature;
+    this.maxTokens = genOpts.maxTokens;
   }
 
   static lmStudio(baseURL: string, model: string): OpenAIClient {
@@ -102,13 +122,14 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
 
   async chat(req: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
     const body = this.encodeRequest(req, false);
+    const combinedSignal = withTimeout(signal, CHAT_TIMEOUT_MS);
     let resp: Response;
     try {
       resp = await fetch(`${this.baseURL}/chat/completions`, {
         method: 'POST',
         headers: this.headers(),
         body: JSON.stringify(body),
-        signal,
+        signal: combinedSignal,
       });
     } catch (err) {
       throw classifyBackend(this.label, err, 0, undefined);
@@ -117,7 +138,17 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
     if (resp.status !== 200) {
       throw classifyBackend(this.label, null, resp.status, raw);
     }
-    const out = JSON.parse(raw) as OAIChatResp;
+    let out: OAIChatResp;
+    try {
+      out = JSON.parse(raw) as OAIChatResp;
+    } catch {
+      throw classifyBackend(
+        this.label,
+        null,
+        resp.status,
+        `invalid JSON from ${this.label}: ${raw}`,
+      );
+    }
     if (out.error) {
       throw new Error(`${this.label} api error: ${out.error.message}`);
     }
@@ -146,13 +177,14 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
     signal?: AbortSignal,
   ): Promise<ChatResponse> {
     const body = this.encodeRequest(req, true);
+    const combinedSignal = withTimeout(signal, CHAT_TIMEOUT_MS);
     let resp: Response;
     try {
       resp = await fetch(`${this.baseURL}/chat/completions`, {
         method: 'POST',
         headers: { ...this.headers(), Accept: 'text/event-stream' },
         body: JSON.stringify(body),
-        signal,
+        signal: combinedSignal,
       });
     } catch (err) {
       throw classifyBackend(this.label, err, 0, undefined);
@@ -185,8 +217,13 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
       const choice = chunk.choices?.[0];
       if (!choice) continue;
       if (choice.finish_reason) finish = choice.finish_reason;
-      if (choice.delta.content) {
-        rawContent += choice.delta.content;
+      const delta = choice.delta ?? {};
+      // Stream reasoning as visible progress (drives the UI off "planning")
+      // but never accumulate it into rawContent — the returned message must
+      // stay reasoning-free so it doesn't poison the next request.
+      if (delta.reasoning_content) onDelta(delta.reasoning_content);
+      if (delta.content) {
+        rawContent += delta.content;
         const view = this.streamingTemplateView(rawContent);
         const emitText = view.visible.slice(emittedLen);
         if (emitText) {
@@ -199,12 +236,14 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
           break;
         }
       }
-      for (const tc of choice.delta.tool_calls ?? []) {
-        const existing = parts.get(tc.index) ?? { id: '', name: '', args: '' };
+      let fallbackIndex = parts.size;
+      for (const tc of delta.tool_calls ?? []) {
+        const idx = typeof tc.index === 'number' ? tc.index : fallbackIndex++;
+        const existing = parts.get(idx) ?? { id: '', name: '', args: '' };
         if (tc.id) existing.id = tc.id;
         if (tc.function?.name) existing.name += tc.function.name;
         if (tc.function?.arguments) existing.args += tc.function.arguments;
-        parts.set(tc.index, existing);
+        parts.set(idx, existing);
       }
     }
 
@@ -229,7 +268,7 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
   }
 
   private headers(): Record<string, string> {
-    const h: Record<string, string> = { 'Content-Type': 'application/json' };
+    const h: Record<string, string> = { ...this.extraHeaders, 'Content-Type': 'application/json' };
     if (this.apiKey) h.Authorization = `Bearer ${this.apiKey}`;
     return h;
   }
@@ -255,6 +294,9 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
       }>;
       thinking?: { type: 'disabled' };
       stop?: string[];
+      temperature?: number;
+      max_tokens?: number;
+      max_completion_tokens?: number;
     } = {
       model: this.modelID,
       stream,
@@ -289,11 +331,27 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
         },
       })),
     };
-    if (this.label === 'kimi') {
+    if (this.label === 'kimi' && kimiSupportsThinkingToggle(this.modelID)) {
+      // kimi-k2.6 / k2.5 are reasoning models: left alone they stream a
+      // `reasoning_content` trace and only then the answer. `thinking:
+      // disabled` suppresses that so `content` carries the answer directly
+      // (verified against the live API). Moonshot v1 models don't document
+      // this parameter, so keep it scoped to Kimi models that support it.
       body.thinking = { type: 'disabled' };
     }
     if (this.label === 'lmstudio') {
       body.stop = LMSTUDIO_STOP_TOKENS;
+    }
+    // Temperature is sent only when configured AND the model accepts it —
+    // kimi-k2.6 / k2.5 lock it to 1 and 400 on anything else, so we skip it
+    // for them rather than error.
+    if (this.temperature !== undefined && !kimiLocksTemperature(this.modelID)) {
+      body.temperature = this.temperature;
+    }
+    // Per-response cap bounds latency / runaway generations when configured.
+    if (this.maxTokens !== undefined && this.maxTokens > 0) {
+      if (this.label === 'kimi') body.max_completion_tokens = this.maxTokens;
+      else body.max_tokens = this.maxTokens;
     }
     return body;
   }
@@ -344,18 +402,28 @@ async function* iterSSE(body: ReadableStream<Uint8Array>): AsyncIterable<string>
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx = buffer.indexOf('\n');
-    while (idx >= 0) {
-      const line = buffer.slice(0, idx).replace(/\r$/, '');
-      buffer = buffer.slice(idx + 1);
-      if (line) yield line;
-      idx = buffer.indexOf('\n');
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx = buffer.indexOf('\n');
+      while (idx >= 0) {
+        const line = buffer.slice(0, idx).replace(/\r$/, '');
+        buffer = buffer.slice(idx + 1);
+        if (line) yield line;
+        idx = buffer.indexOf('\n');
+      }
     }
+    buffer += decoder.decode();
+    if (buffer.length > 0) yield buffer.replace(/\r$/, '');
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  buffer += decoder.decode();
-  if (buffer.length > 0) yield buffer.replace(/\r$/, '');
+}
+
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  if (!signal) return timeout;
+  return AbortSignal.any([signal, timeout]);
 }

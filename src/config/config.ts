@@ -1,6 +1,7 @@
 // Config file at ~/.pentesterflow/config.json. Loaded once at startup; saved atomically (write to
 // sibling .tmp + fsync + rename) so a crash mid-write can't corrupt it.
 
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { chmod, open, rename, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -9,7 +10,17 @@ import { z } from 'zod';
 
 // ---------- Schema ----------
 
-const Backend = z.enum(['', 'ollama', 'lmstudio', 'openai-compat', 'kimi', 'groq', 'gemini']);
+const Backend = z.enum([
+  '',
+  'ollama',
+  'lmstudio',
+  'openai-compat',
+  'kimi',
+  'groq',
+  'openrouter',
+  'deepseek',
+  'gemini',
+]);
 export type Backend = z.infer<typeof Backend>;
 
 const MCPServerConfig = z.object({
@@ -37,6 +48,11 @@ export type PluginConfig = z.infer<typeof PluginConfig>;
 const ToolingProfile = z.enum(['minimal', 'full']);
 export type ToolingProfile = z.infer<typeof ToolingProfile>;
 
+/** Schema default for auto_compact_threshold. Exported so backend-specific
+ *  overrides (e.g. large-context Kimi models) can detect "user is on the
+ *  default" and size the threshold to the model's real context window. */
+export const DEFAULT_AUTO_COMPACT_THRESHOLD = 16000;
+
 const ConfigSchema = z.object({
   backend: Backend.default(''),
   model: z.string().default(''),
@@ -61,7 +77,15 @@ const ConfigSchema = z.object({
   // disables (manual /compact only). The default of 16000 tokens leaves
   // headroom for smaller local models (4k-8k context) and is harmless
   // for larger ones; users can raise it if they want longer threads.
-  auto_compact_threshold: z.number().int().nonnegative().default(16000),
+  auto_compact_threshold: z.number().int().nonnegative().default(DEFAULT_AUTO_COMPACT_THRESHOLD),
+  // Sampling temperature. Unset → use the provider default. Sent only to
+  // models that accept it: kimi-k2.6 / k2.5 lock it to 1 and reject anything
+  // else, so a configured value is silently skipped for those.
+  temperature: z.number().min(0).max(2).optional(),
+  // Per-response token cap. Unset → provider default (Kimi falls back to
+  // KIMI_DEFAULT_MAX_TOKENS so it can't narrate unbounded). Bounds latency
+  // and runaway generations; raise it if long final answers get truncated.
+  max_tokens: z.number().int().positive().optional(),
   // Tooling profile: which tools the agent reaches for by default.
   //   'minimal' — curl + Unix only (jq, grep, awk, sed, head, sort, uniq).
   //   'full'    — adds ffuf, nuclei, sqlmap, gobuster, subfinder, httpx,
@@ -119,15 +143,7 @@ export async function save(cfg: Config): Promise<void> {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
 
   const body = `${JSON.stringify(cfg, null, 2)}\n`;
-  const tmp = join(dir, '.pentesterflow.cfg.tmp');
-
-  // Best-effort clear of any orphan from a prior crash. The O_EXCL below
-  // would otherwise fail.
-  try {
-    await unlink(tmp);
-  } catch {
-    /* ignore */
-  }
+  const tmp = join(dir, `.pentesterflow.cfg.tmp.${randomBytes(3).toString('hex')}`);
 
   let fh: Awaited<ReturnType<typeof open>> | undefined;
   try {

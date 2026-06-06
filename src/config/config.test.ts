@@ -48,6 +48,19 @@ describe('config', () => {
     expect(reloaded.mcp_servers[0]?.command).toBe('npx');
   });
 
+  it('supports overlapping saves without temp-file collisions', async () => {
+    const one = defaultConfig();
+    one.backend = 'ollama';
+    one.model = 'model-one';
+    const two = defaultConfig();
+    two.backend = 'groq';
+    two.model = 'model-two';
+    two.api_key = 'sk-test';
+
+    await expect(Promise.all([save(one), save(two)])).resolves.toHaveLength(2);
+    expect(['model-one', 'model-two']).toContain(load().model);
+  });
+
   it('rejects shell-meta in mcp command', async () => {
     const cfg = defaultConfig();
     cfg.mcp_servers = [{ name: 'evil', command: 'npx; rm -rf /', args: [] }];
@@ -86,6 +99,28 @@ describe('config', () => {
     const reloaded = load();
     expect(reloaded.backend).toBe('gemini');
     expect(reloaded.model).toBe('models/gemini-3.5-flash');
+  });
+
+  it('accepts OpenRouter as a backend', async () => {
+    const cfg = defaultConfig();
+    cfg.backend = 'openrouter';
+    cfg.model = 'openrouter/auto';
+    cfg.api_key = 'sk-or-test';
+    await save(cfg);
+    const reloaded = load();
+    expect(reloaded.backend).toBe('openrouter');
+    expect(reloaded.model).toBe('openrouter/auto');
+  });
+
+  it('accepts DeepSeek as a backend', async () => {
+    const cfg = defaultConfig();
+    cfg.backend = 'deepseek';
+    cfg.model = 'deepseek-v4-flash';
+    cfg.api_key = 'sk-deepseek-test';
+    await save(cfg);
+    const reloaded = load();
+    expect(reloaded.backend).toBe('deepseek');
+    expect(reloaded.model).toBe('deepseek-v4-flash');
   });
 
   it('leaves tooling_profile undefined when never set (signals first run)', () => {

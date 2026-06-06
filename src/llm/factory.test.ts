@@ -39,6 +39,42 @@ describe('newFromConfig', () => {
     expect(() => newFromConfig(cfg)).toThrow(/GROQ_API_KEY/);
   });
 
+  it('creates an OpenRouter client with defaults', () => {
+    const cfg = defaultConfig();
+    cfg.backend = 'openrouter';
+    cfg.api_key = 'sk-or-test';
+
+    const client = newFromConfig(cfg);
+
+    expect(client.name()).toBe('openrouter');
+    expect(client.model()).toBe('openrouter/auto');
+  });
+
+  it('requires an OpenRouter API key', () => {
+    const cfg = defaultConfig();
+    cfg.backend = 'openrouter';
+
+    expect(() => newFromConfig(cfg)).toThrow(/OPENROUTER_API_KEY/);
+  });
+
+  it('creates a DeepSeek client with defaults', () => {
+    const cfg = defaultConfig();
+    cfg.backend = 'deepseek';
+    cfg.api_key = 'sk-deepseek-test';
+
+    const client = newFromConfig(cfg);
+
+    expect(client.name()).toBe('deepseek');
+    expect(client.model()).toBe('deepseek-v4-flash');
+  });
+
+  it('requires a DeepSeek API key', () => {
+    const cfg = defaultConfig();
+    cfg.backend = 'deepseek';
+
+    expect(() => newFromConfig(cfg)).toThrow(/DEEPSEEK_API_KEY/);
+  });
+
   it('creates a Gemini client with defaults', () => {
     const cfg = defaultConfig();
     cfg.backend = 'gemini';
