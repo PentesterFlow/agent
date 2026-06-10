@@ -23,6 +23,7 @@ export const DENY_PATTERNS: RegExp[] = [
   // Matches short (-rf, -fr) and long (--recursive --force) flag forms, in
   // either order; deeper paths like /home/user are left to the operator.
   /\brm\b(?=[^|;&\n]*\s-{1,2}[a-z-]*r)(?=[^|;&\n]*\s-{1,2}[a-z-]*f)[^|;&\n]*\s\/[^/\s]*\/?(?:\s|$)/i,
+  /\brm\b(?=[^|;&\n]*\s-{1,2}[a-z-]*r)(?=[^|;&\n]*\s-{1,2}[a-z-]*f)[^|;&\n]*\s["']\/[^/"'\s]*\/?["'](?:\s|$)/i,
   /:\(\)\s*\{\s*:\|:&\s*\}/i, // fork bomb
   /\bmkfs\b/i,
   /\bdd\b[^|;&\n]*\bof=\/dev\//i,
@@ -77,6 +78,13 @@ const PORTABILITY_PATTERNS: Array<{ re: RegExp; message: string }> = [
   },
 ];
 
+// Only rewrite `grep` at a command position (start of string or right after a
+// shell separator), so a literal `grep -P ...` inside an `echo`/`awk` string is
+// not matched and corrupted. The leading separator + whitespace are captured so
+// the rewrite can re-emit them verbatim.
+const GREP_P_RE =
+  /(^|[\n|;&(])([ \t]*)grep\s+((?:(?:-[A-Za-z]+|--perl-regexp)\s+)*)((?:'[^']*')|(?:"[^"]*")|(?:\\.|[^\s|;&])+)([^|;&\n]*)/g;
+
 export class ShellTool implements Tool {
   private readonly shellPath: string;
   private readonly toolName: string;
@@ -120,19 +128,28 @@ export class ShellTool implements Tool {
     return true;
   }
 
+  // Scope an "allow session" approval to the exact command the user saw.
+  // A different command re-prompts, so approving `id` once can't silently
+  // license arbitrary later commands for the rest of the session. We do NOT
+  // set noSessionCache: re-running the identical command should stay quiet.
+  permissionHints(args: Record<string, unknown>): { cacheKey: string } {
+    return { cacheKey: rewritePortableCommand(argString(args, 'command')) };
+  }
+
   summarize(args: Record<string, unknown>): { summary: string; detail: string } {
-    const cmd = argString(args, 'command');
+    const cmd = rewritePortableCommand(argString(args, 'command'));
     const firstLine = cmd.split('\n', 1)[0] ?? '';
     const truncated = firstLine.length > 120 ? `${firstLine.slice(0, 117)}...` : firstLine;
     return { summary: `${this.toolName}: ${truncated}`, detail: cmd };
   }
 
   async run(args: Record<string, unknown>, signal: AbortSignal, _p: Prompter): Promise<string> {
-    const cmdStr = argString(args, 'command');
+    const originalCmd = argString(args, 'command');
+    const cmdStr = rewritePortableCommand(originalCmd);
     if (!cmdStr) throw new Error('command is required');
 
     for (const re of DENY_PATTERNS) {
-      if (re.test(cmdStr)) {
+      if (re.test(originalCmd) || re.test(cmdStr)) {
         throw new Error(`command blocked by denylist (matched ${re.source})`);
       }
     }
@@ -150,6 +167,68 @@ export class ShellTool implements Tool {
 
     return runWithCapture(this.shellPath, ['-c', cmdStr], timeoutMs, signal);
   }
+}
+
+export function rewritePortableCommand(command: string): string {
+  return command.replace(
+    GREP_P_RE,
+    (match, sep: string, lead: string, rawFlags: string, rawPattern: string, rest: string) => {
+      const flags = rawFlags.trim().split(/\s+/).filter(Boolean);
+      const shortFlags = flags
+        .filter((flag) => /^-[A-Za-z]+$/.test(flag))
+        .map((flag) => flag.slice(1))
+        .join('');
+      const hasPerlRegexp = flags.includes('--perl-regexp') || shortFlags.includes('P');
+      if (!hasPerlRegexp) return match;
+
+      const unsupportedFlags = shortFlags.replace(/[Piovh]/g, '');
+      const hasUnsupportedLong = flags.some(
+        (flag) => flag.startsWith('--') && flag !== '--perl-regexp',
+      );
+      if (unsupportedFlags || hasUnsupportedLong) return match;
+
+      const pattern = unquoteShellToken(rawPattern);
+      if (pattern == null) return match;
+
+      const fileArgs = rest.trim();
+      // Bail if an option-like token trails the pattern (e.g. `-A3`, `--color`).
+      // grep context/format flags have no faithful perl one-liner equivalent;
+      // emitting them as bareword perl "filenames" would silently corrupt the
+      // command. Leaving the original `grep -P` lets the portability guard
+      // surface a clear message instead of producing a broken rewrite.
+      if (/(?:^|\s)-/.test(fileArgs)) return match;
+
+      const regexFlags = shortFlags.includes('i') ? 'i' : '';
+      const negate = shortFlags.includes('v');
+      const extractOnly = shortFlags.includes('o');
+      // Pass the user pattern as DATA via the environment, never inlined into
+      // the Perl source. A regex built from an interpolated *variable* matches
+      // its content as a pattern but does NOT run `@{[...]}` interpolation or
+      // `(?{...})` code blocks (those require a literal regex / `use re 'eval'`),
+      // so the portability rewrite can't become a code-execution primitive.
+      const prelude = 'BEGIN { $p = $ENV{PF_GREP_PAT} } ';
+      const code = extractOnly
+        ? `${prelude}while (/$p/${regexFlags}g) { print "$&\\n" }`
+        : negate
+          ? `${prelude}print unless /$p/${regexFlags}`
+          : `${prelude}print if /$p/${regexFlags}`;
+      const perl = `PF_GREP_PAT=${shellQuote(pattern)} perl -ne ${shellQuote(code)}`;
+      return `${sep}${lead}${perl}${fileArgs ? ` ${fileArgs}` : ''}`;
+    },
+  );
+}
+
+function unquoteShellToken(token: string): string | null {
+  if (!token) return null;
+  if (token.startsWith("'") && token.endsWith("'")) return token.slice(1, -1);
+  if (token.startsWith('"') && token.endsWith('"')) {
+    return token.slice(1, -1).replace(/\\(["\\$`])/g, '$1');
+  }
+  return token.replace(/\\(.)/g, '$1');
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /** BashTool is a PascalCase alias for ShellTool that uses /bin/bash. */
@@ -171,15 +250,24 @@ function runWithCapture(
 ): Promise<string> {
   return new Promise((resolveOut) => {
     const controller = new AbortController();
-    const onParentAbort = () => controller.abort();
+    let childPid = 0;
+    const onParentAbort = () => {
+      killProcessGroup(childPid);
+      controller.abort();
+    };
     if (parentSignal.aborted) controller.abort();
     else parentSignal.addEventListener('abort', onParentAbort, { once: true });
 
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killProcessGroup(childPid);
+      controller.abort();
+    }, timeoutMs);
     let timedOut = false;
     timer.unref?.();
 
-    const child = spawn(cmd, argv, { signal: controller.signal });
+    const child = spawn(cmd, argv, { detached: true, signal: controller.signal });
+    childPid = child.pid ?? 0;
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     let stdoutLen = 0;
@@ -216,9 +304,6 @@ function runWithCapture(
       const stdout = truncate(Buffer.concat(stdoutChunks).toString('utf8'), stdoutTotal);
       const stderr = truncate(Buffer.concat(stderrChunks).toString('utf8'), stderrTotal);
 
-      if (controller.signal.aborted && !parentSignal.aborted) {
-        timedOut = true;
-      }
       if (timedOut) {
         resolveOut(
           `exit: timeout after ${timeoutMs / 1000}s\nstdout:\n${stdout}\nstderr:\n${stderr}`,
@@ -233,6 +318,7 @@ function runWithCapture(
     });
 
     child.on('error', (err) => {
+      if (controller.signal.aborted && err.name === 'AbortError') return;
       clearTimeout(timer);
       parentSignal.removeEventListener('abort', onParentAbort);
       const stdout = truncate(Buffer.concat(stdoutChunks).toString('utf8'), stdoutTotal);
@@ -240,6 +326,19 @@ function runWithCapture(
       resolveOut(`exit: -1\nstdout:\n${stdout}\nstderr:\n${stderr}\nerror: ${err.message}`);
     });
   });
+}
+
+function killProcessGroup(pid: number): void {
+  if (!pid) return;
+  try {
+    process.kill(-pid, 'SIGTERM');
+  } catch {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 function truncate(s: string, total?: number): string {

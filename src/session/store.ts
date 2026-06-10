@@ -49,6 +49,8 @@ export interface SessionMemory {
   lastCompactedAt?: string;
   lastSummary?: string;
   objectives: string[];
+  plan: string[];
+  completed: string[];
   findings: string[];
   tested: string[];
   files: string[];

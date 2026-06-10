@@ -6,8 +6,10 @@
 // confirm_finding) keep their format intact.
 
 import { Chalk } from 'chalk';
+import { highlight } from 'cli-highlight';
+import { chalkLevel } from './colorLevel.js';
 
-const chalk = new Chalk({ level: 3 });
+const chalk = new Chalk({ level: chalkLevel() });
 
 const EXIT_RE = /^exit:\s*(-?\d+|timeout[^\n]*)/;
 const STDOUT_LABEL = 'stdout:';
@@ -130,6 +132,66 @@ export function shellResultExitStatus(body: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// HTTP-response coloring — the http tool emits `HTTP/1.1 <status> <text>`, a
+// header block, a blank line, then the body. Color the status line by class
+// (2xx green, 3xx cyan, 4xx yellow, 5xx red), dim header names, and best-
+// effort syntax-highlight a JSON body. Coloring never changes line counts
+// (no reflow), so the collapse accounting in buildToolResultView stays valid.
+// ---------------------------------------------------------------------------
+
+const HTTP_STATUS_RE = /^(HTTP\/[\d.]+)\s+(\d{3})\s*(.*)$/;
+
+/** True when a tool-result body looks like an http-tool HTTP response. */
+export function looksLikeHTTPResult(body: string): boolean {
+  return HTTP_STATUS_RE.test(body.split('\n', 1)[0] ?? '');
+}
+
+function statusColor(code: number): (s: string) => string {
+  if (code >= 200 && code < 300) return (s) => chalk.green(s);
+  if (code >= 300 && code < 400) return (s) => chalk.cyan(s);
+  if (code >= 400 && code < 500) return (s) => chalk.yellow(s);
+  if (code >= 500) return (s) => chalk.red(s);
+  return (s) => s;
+}
+
+function colorizeHeaderLine(line: string): string {
+  const idx = line.indexOf(':');
+  if (idx <= 0) return line;
+  return `${chalk.dim(line.slice(0, idx + 1))}${line.slice(idx + 1)}`;
+}
+
+function maybeHighlightJSON(bodyText: string): string {
+  const trimmed = bodyText.trimStart();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return bodyText;
+  try {
+    return highlight(bodyText, { language: 'json', ignoreIllegals: true });
+  } catch {
+    return bodyText;
+  }
+}
+
+export function colorizeHTTPResult(body: string): string {
+  const lines = body.split('\n');
+  const statusMatch = lines[0]?.match(HTTP_STATUS_RE);
+  if (!statusMatch) return body;
+
+  const code = Number.parseInt(statusMatch[2] ?? '', 10);
+  const color = statusColor(code);
+  const statusText = `${statusMatch[2]} ${statusMatch[3] ?? ''}`.trimEnd();
+  const statusLine = `${chalk.dim(statusMatch[1] ?? '')} ${color(chalk.bold(statusText))}`;
+
+  // Headers run until the first blank line; everything after it is the body.
+  const blankIdx = lines.indexOf('', 1);
+  const headerEnd = blankIdx === -1 ? lines.length : blankIdx;
+  const out = [statusLine, ...lines.slice(1, headerEnd).map(colorizeHeaderLine)];
+  if (blankIdx !== -1) {
+    out.push('');
+    out.push(maybeHighlightJSON(lines.slice(blankIdx + 1).join('\n')));
+  }
+  return out.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // Smart tool-result view — extract readable text, then collapse anything long
 // behind a head preview the user can expand with Ctrl-O. Keeps the transcript
 // scannable when a single MCP call (e.g. a browser accessibility snapshot)
@@ -197,8 +259,11 @@ function formatBytes(n: number): string {
  */
 export function buildToolResultView(raw: string): ToolResultView {
   const content = compactShellResultForTranscript(extractTextContent(raw));
-  const colorize = (s: string): string =>
-    looksLikeShellResult(content) ? colorizeShellResult(s) : s;
+  const colorize: (s: string) => string = looksLikeShellResult(content)
+    ? colorizeShellResult
+    : looksLikeHTTPResult(content)
+      ? colorizeHTTPResult
+      : (s) => s;
 
   const full = colorize(content);
   const lines = content.split('\n');

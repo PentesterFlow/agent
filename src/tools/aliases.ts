@@ -23,6 +23,16 @@ const TOOL_NAME_TO_CANONICAL: Record<string, string> = {
   FileWriteTool: 'file_write',
   file_edit: 'file_edit',
   FileEditTool: 'file_edit',
+  // Search + ask. The tools register under PascalCase / suffixed names
+  // (GlobTool, GrepTool, ask_user); map the bare forms a skill author might
+  // write so either spelling canonicalizes to the real runtime name and the
+  // allowed-tools enforcer matches (L14).
+  glob: 'GlobTool',
+  GlobTool: 'GlobTool',
+  grep: 'GrepTool',
+  GrepTool: 'GrepTool',
+  ask: 'ask_user',
+  ask_user: 'ask_user',
 };
 
 /**
@@ -50,12 +60,18 @@ export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
   'FileWriteTool',
   'file_edit',
   'FileEditTool',
+  // Search + ask: include the actual registered names (GlobTool/GrepTool/
+  // ask_user) so a skill declaring the correct runtime name validates, plus the
+  // bare aliases which now canonicalize to them (L14).
   'glob',
+  'GlobTool',
   'grep',
+  'GrepTool',
   'http',
   'web_fetch',
   'web_search',
   'ask',
+  'ask_user',
   'confirm_finding',
   'load_skill',
   'read_payloads',

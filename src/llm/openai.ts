@@ -27,6 +27,10 @@ interface OAIToolCallFragment {
 interface OAIChoiceMessage {
   role: string;
   content?: string;
+  // Some reasoning models/proxies (deepseek-reasoner-style) return the answer
+  // here with an empty `content` on the non-streaming path. We fall back to it
+  // so the turn isn't blank (M7).
+  reasoning_content?: string;
   tool_calls?: Array<{
     id?: string;
     type?: string;
@@ -55,6 +59,15 @@ interface OAIStreamResp {
     };
     finish_reason?: string;
   }>;
+}
+
+/** Smallest non-negative integer key not already present in the map. Used to
+ *  allocate a fresh synthetic tool-call index without colliding with explicit
+ *  indexes the server did send. */
+function nextMapKey(parts: Map<number, unknown>): number {
+  let max = -1;
+  for (const k of parts.keys()) if (k > max) max = k;
+  return max + 1;
 }
 
 const LMSTUDIO_STOP_TOKENS = [
@@ -159,9 +172,12 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
     }
     const choice = out.choices[0];
     if (!choice) throw new Error(`${this.label}: empty choices`);
+    // Prefer content; fall back to reasoning_content only when content is empty
+    // (M7) so a reasoning-only non-streaming response isn't returned blank.
+    const rawText = choice.message.content || choice.message.reasoning_content || '';
     const msg: Message = {
       role: 'assistant',
-      content: this.trimLeakedTemplate(choice.message.content ?? ''),
+      content: this.trimLeakedTemplate(rawText),
     };
     if (choice.message.tool_calls?.length) {
       msg.toolCalls = choice.message.tool_calls.map<ToolCall>((tc) => ({
@@ -203,6 +219,10 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
     let emittedLen = 0;
     let finish = '';
     const parts = new Map<number, { id: string; name: string; args: string }>();
+    // Synthetic index for servers that omit tool_call `index`. Persisted across
+    // chunks so one call's fragments don't land in a fresh entry each chunk and
+    // split its name/args (M6). -1 = no fallback call started yet.
+    let fallbackIndex = -1;
     let stoppedByTemplate = false;
 
     for await (const line of iterSSE(resp.body)) {
@@ -238,9 +258,20 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
           break;
         }
       }
-      let fallbackIndex = parts.size;
       for (const tc of delta.tool_calls ?? []) {
-        const idx = typeof tc.index === 'number' ? tc.index : fallbackIndex++;
+        let idx: number;
+        if (typeof tc.index === 'number') {
+          idx = tc.index;
+        } else if (tc.id || tc.function?.name || fallbackIndex < 0) {
+          // A new call begins (carries an id/name) or this is the first
+          // index-less fragment: allocate a fresh synthetic index.
+          fallbackIndex = nextMapKey(parts);
+          idx = fallbackIndex;
+        } else {
+          // Pure argument continuation with no index/id/name: keep appending to
+          // the call we're currently assembling rather than starting a new one.
+          idx = fallbackIndex;
+        }
         const existing = parts.get(idx) ?? { id: '', name: '', args: '' };
         if (tc.id) existing.id = tc.id;
         if (tc.function?.name) existing.name += tc.function.name;

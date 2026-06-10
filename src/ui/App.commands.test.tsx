@@ -194,6 +194,8 @@ describe('UI slash commands (terminal integration)', () => {
     const frame = mounted.lastFrame() ?? '';
     expect(frame).toMatch(/backend|Ollama/i);
     expect(frame).toContain('Kimi');
+    expect(frame).toContain('OpenRouter');
+    expect(frame).toContain('DeepSeek');
     expect(runSpy).not.toHaveBeenCalled();
   });
 
@@ -345,6 +347,99 @@ describe('UI slash commands (terminal integration)', () => {
       model: 'models/gemini-flash-lite-latest',
       baseURL: 'https://generativelanguage.googleapis.com/v1beta',
       apiKey: 'gemini-test',
+    });
+    expect(runSpy).not.toHaveBeenCalled();
+  });
+
+  it('/provider can collect and test an OpenRouter API key before model selection', async () => {
+    vi.mocked(listModels).mockResolvedValueOnce(['openrouter/auto', 'anthropic/claude-sonnet-4.5']);
+    mounted = renderApp({
+      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+    });
+    await tick();
+    await submit(mounted.stdin, '/provider');
+
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\r');
+    await tick();
+
+    expect(mounted.lastFrame()).toContain('OpenRouter');
+    mounted.stdin.write('sk-or-test');
+    await tick();
+    mounted.stdin.write('\r');
+    await tick();
+
+    expect(listModels).toHaveBeenCalledWith(
+      'openrouter',
+      'https://openrouter.ai/api/v1',
+      'sk-or-test',
+    );
+    expect(mounted.lastFrame()).toContain('Select model for OpenRouter');
+    expect(mounted.lastFrame()).toContain('OpenRouter router');
+
+    mounted.stdin.write('\r');
+    await tick();
+    expect(applyProvider).toHaveBeenCalledWith({
+      backend: 'openrouter',
+      model: 'openrouter/auto',
+      baseURL: 'https://openrouter.ai/api/v1',
+      apiKey: 'sk-or-test',
+    });
+    expect(runSpy).not.toHaveBeenCalled();
+  });
+
+  it('/provider can collect and test a DeepSeek API key before model selection', async () => {
+    vi.mocked(listModels).mockResolvedValueOnce(['deepseek-v4-flash', 'deepseek-v4-pro']);
+    mounted = renderApp({
+      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+    });
+    await tick();
+    await submit(mounted.stdin, '/provider');
+
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\x1B[B');
+    await tick();
+    mounted.stdin.write('\r');
+    await tick();
+
+    expect(mounted.lastFrame()).toContain('DeepSeek');
+    mounted.stdin.write('sk-deepseek-test');
+    await tick();
+    mounted.stdin.write('\r');
+    await tick();
+
+    expect(listModels).toHaveBeenCalledWith(
+      'deepseek',
+      'https://api.deepseek.com',
+      'sk-deepseek-test',
+    );
+    expect(mounted.lastFrame()).toContain('Select model for DeepSeek');
+
+    mounted.stdin.write('\r');
+    await tick();
+    expect(applyProvider).toHaveBeenCalledWith({
+      backend: 'deepseek',
+      model: 'deepseek-v4-flash',
+      baseURL: 'https://api.deepseek.com',
+      apiKey: 'sk-deepseek-test',
     });
     expect(runSpy).not.toHaveBeenCalled();
   });

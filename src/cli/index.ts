@@ -6,7 +6,8 @@
 // (cli-highlight, ink-spinner, etc.) cache their color level.
 import './forceColor.js';
 
-import { type FSWatcher, existsSync, watch as fsWatch } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { type FSWatcher, existsSync, watch as fsWatch, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { render } from 'ink';
 import React from 'react';
@@ -16,6 +17,7 @@ import { type IngestServerHandle, startIngestServer } from '../browser/server.js
 import { CaptureStore } from '../browser/store.js';
 import * as config from '../config/config.js';
 import { CoverageStore } from '../coverage/store.js';
+import { EngagementStore } from '../engagement/store.js';
 import { findingRequestForBurp } from '../findings/httpRequest.js';
 import { Store as FindingsStore } from '../findings/store.js';
 import { IntelligenceStore } from '../intelligence/store.js';
@@ -23,9 +25,12 @@ import * as llmFactory from '../llm/factory.js';
 import { modelReliabilityWarning } from '../llm/modelWarnings.js';
 import { detectOllamaContextWindow, probeToolSupport } from '../llm/probe.js';
 import {
+  DEEPSEEK_DEFAULT_BASE_URL,
   GEMINI_DEFAULT_BASE_URL,
   GROQ_DEFAULT_BASE_URL,
   KIMI_DEFAULT_BASE_URL,
+  OPENROUTER_DEFAULT_BASE_URL,
+  kimiAutoCompactThreshold,
 } from '../llm/providers.js';
 import * as logger from '../logger/logger.js';
 import { createSessionDebugLog } from '../logger/sessionDebug.js';
@@ -142,6 +147,9 @@ function parseFlags(argv: string[]): ParsedFlags {
       case '--resume':
         out.resumeID = next();
         break;
+      case '--yolo':
+      // --dangerously-skip-permissions is the original spelling, kept as an
+      // alias so existing scripts/docs keep working. Both mean YOLO mode.
       case '--dangerously-skip-permissions':
         out.yolo = true;
         break;
@@ -222,10 +230,21 @@ async function main(): Promise<number> {
       process.stderr.write(`${err.formatMessage()}\n`);
       return 1;
     }
-    process.stderr.write(`${(err as Error).message}\n`);
-    return 1;
+    const badPath = config.loadedConfigPath() ?? config.canonicalConfigPath();
+    const backupPath = `${badPath}.bad-${Date.now()}`;
+    try {
+      renameSync(badPath, backupPath);
+      process.stderr.write(
+        `warning: config was invalid and has been moved to ${backupPath}: ${(err as Error).message}\n`,
+      );
+    } catch {
+      process.stderr.write(`warning: config was invalid: ${(err as Error).message}\n`);
+    }
+    cfg = config.defaultConfig();
   }
-  process.stderr.write(`config: ${config.loadedConfigPath()}\n`);
+  if (config.loadedConfigPath()) {
+    process.stderr.write(`config: ${config.loadedConfigPath()}\n`);
+  }
   if (flags.backend) cfg = { ...cfg, backend: flags.backend as config.Config['backend'] };
   if (flags.model) cfg.model = flags.model;
   if (flags.baseURL) cfg.base_url = flags.baseURL;
@@ -236,6 +255,12 @@ async function main(): Promise<number> {
   }
   if (cfg.backend === 'groq' && !cfg.api_key) {
     cfg.api_key = process.env.GROQ_API_KEY || '';
+  }
+  if (cfg.backend === 'openrouter' && !cfg.api_key) {
+    cfg.api_key = process.env.OPENROUTER_API_KEY || '';
+  }
+  if (cfg.backend === 'deepseek' && !cfg.api_key) {
+    cfg.api_key = process.env.DEEPSEEK_API_KEY || '';
   }
   if (cfg.backend === 'gemini' && !cfg.api_key) {
     cfg.api_key = process.env.GEMINI_API_KEY || '';
@@ -345,6 +370,10 @@ async function main(): Promise<number> {
   // agent has tried. Persists alongside findings so resumes keep state.
   const coverageStore = new CoverageStore(`findings/coverage-${sessionID}.json`);
   const intelligenceStore = new IntelligenceStore();
+  // Operator-authored engagement notes (scope/rules/creds). Read once at
+  // startup from project + home .pentesterflow/engagement.md; always injected
+  // into the system prompt so it survives compaction unconditionally.
+  const engagement = new EngagementStore().load();
 
   // Tools.
   const tools = new ToolRegistry();
@@ -394,16 +423,19 @@ async function main(): Promise<number> {
   // the agent can call _status and learn the extension isn't running.
   registerBrowserCaptureTools((t) => tools.register(t), captureStore);
   let ingestHandle: IngestServerHandle | null = null;
+  const ingestToken = randomBytes(16).toString('hex');
   const startBurpBridge = async (
     port = flags.burpPort,
-  ): Promise<{ url: string; alreadyRunning: boolean }> => {
-    if (ingestHandle) return { url: ingestHandle.url, alreadyRunning: true };
+  ): Promise<{ url: string; token: string; alreadyRunning: boolean }> => {
+    if (ingestHandle)
+      return { url: ingestHandle.url, token: ingestHandle.token, alreadyRunning: true };
     ingestHandle = await startIngestServer({
       store: captureStore,
       port,
+      token: ingestToken,
       onEvent: (text) => noticeHolder.publish?.(text),
     });
-    return { url: ingestHandle.url, alreadyRunning: false };
+    return { url: ingestHandle.url, token: ingestHandle.token, alreadyRunning: false };
   };
   const closeBurpBridge = async (): Promise<void> => {
     const handle = ingestHandle as IngestServerHandle | null;
@@ -413,7 +445,7 @@ async function main(): Promise<number> {
     try {
       const result = await startBurpBridge(flags.burpPort);
       process.stderr.write(
-        `PentesterFlow Burp bridge listening at ${result.url} — set this URL in the Burp plugin.\n`,
+        `PentesterFlow Burp bridge listening at ${result.url}\nPentesterFlow Burp bridge token: ${result.token}\nSet both values in the Burp plugin.\n`,
       );
     } catch (err) {
       process.stderr.write(
@@ -468,6 +500,7 @@ async function main(): Promise<number> {
     const picked = await runFirstRunPicker();
     if (picked === null) {
       await Promise.all(mcpSessions.map((s) => s.close()));
+      await closeBurpBridge();
       process.stderr.write('first-run setup cancelled — exiting.\n');
       return 0;
     }
@@ -496,6 +529,7 @@ async function main(): Promise<number> {
     toolingProfile: cfg.tooling_profile,
     promptProfile: effectivePromptProfile(cfg),
     intelligence: intelligenceStore,
+    engagement,
     // --no-stream takes precedence over the config default so users can
     // toggle off streaming for a single launch without rewriting config.
     streamingEnabled: flags.noStream ? false : cfg.streaming_enabled,
@@ -698,24 +732,28 @@ async function main(): Promise<number> {
     },
   );
 
-  await inkApp.waitUntilExit();
-  sessionDebug.write('session_exit');
-  // Trip the root abort signal before tearing down MCP sessions and the
-  // ingest server. The TUI's own Ctrl-C path aborts the per-run signal
-  // (runCtl) and then calls exit(), but never the root signal — so any
-  // background tool that holds rootCtl.signal (e.g. plugins, long-lived
-  // MCP requests) would otherwise keep running while we close.
-  rootCtl.abort();
-  for (const w of watchers) {
-    try {
-      w.close();
-    } catch {
-      /* best-effort */
+  try {
+    await inkApp.waitUntilExit();
+  } finally {
+    sessionDebug.write('session_exit');
+    process.stderr.write(`${buildExitResumeHint(sessionID)}\n`);
+    // Trip the root abort signal before tearing down MCP sessions and the
+    // ingest server. The TUI's own Ctrl-C path aborts the per-run signal
+    // (runCtl) and then calls exit(), but never the root signal — so any
+    // background tool that holds rootCtl.signal (e.g. plugins, long-lived
+    // MCP requests) would otherwise keep running while we close.
+    rootCtl.abort();
+    for (const w of watchers) {
+      try {
+        w.close();
+      } catch {
+        /* best-effort */
+      }
     }
+    if (reloadTimer) clearTimeout(reloadTimer);
+    await Promise.all(mcpSessions.map((s) => s.close()));
+    await closeBurpBridge();
   }
-  if (reloadTimer) clearTimeout(reloadTimer);
-  await Promise.all(mcpSessions.map((s) => s.close()));
-  await closeBurpBridge();
   return 0;
 }
 
@@ -734,6 +772,10 @@ function providerLabel(b: string): string {
       return 'Kimi';
     case 'groq':
       return 'Groq';
+    case 'openrouter':
+      return 'OpenRouter';
+    case 'deepseek':
+      return 'DeepSeek';
     case 'gemini':
       return 'Gemini';
     default:
@@ -742,7 +784,12 @@ function providerLabel(b: string): string {
 }
 
 function localityFor(b: string): string {
-  return b === 'openai-compat' || b === 'kimi' || b === 'groq' || b === 'gemini'
+  return b === 'openai-compat' ||
+    b === 'kimi' ||
+    b === 'groq' ||
+    b === 'openrouter' ||
+    b === 'deepseek' ||
+    b === 'gemini'
     ? 'remote'
     : 'local';
 }
@@ -756,6 +803,10 @@ function defaultEndpoint(cfg: config.Config, b: string): string {
       return KIMI_DEFAULT_BASE_URL;
     case 'groq':
       return GROQ_DEFAULT_BASE_URL;
+    case 'openrouter':
+      return OPENROUTER_DEFAULT_BASE_URL;
+    case 'deepseek':
+      return DEEPSEEK_DEFAULT_BASE_URL;
     case 'gemini':
       return GEMINI_DEFAULT_BASE_URL;
     default:
@@ -764,9 +815,21 @@ function defaultEndpoint(cfg: config.Config, b: string): string {
 }
 
 function effectiveAutoCompactThreshold(cfg: config.Config): number {
-  if (cfg.backend !== 'groq') return cfg.auto_compact_threshold;
-  if (cfg.auto_compact_threshold <= 0) return GROQ_AUTO_COMPACT_THRESHOLD;
-  return Math.min(cfg.auto_compact_threshold, GROQ_AUTO_COMPACT_THRESHOLD);
+  if (cfg.backend === 'groq') {
+    if (cfg.auto_compact_threshold <= 0) return GROQ_AUTO_COMPACT_THRESHOLD;
+    return Math.min(cfg.auto_compact_threshold, GROQ_AUTO_COMPACT_THRESHOLD);
+  }
+  // Kimi's k2.6/k2.5 carry a 256K window; the generic 16K default would
+  // compact away ~94% of it. When the user hasn't customized the threshold,
+  // size it to the model's real context window. An explicit setting (any
+  // value other than the schema default) is always respected.
+  if (
+    cfg.backend === 'kimi' &&
+    cfg.auto_compact_threshold === config.DEFAULT_AUTO_COMPACT_THRESHOLD
+  ) {
+    return kimiAutoCompactThreshold(cfg.model) ?? cfg.auto_compact_threshold;
+  }
+  return cfg.auto_compact_threshold;
 }
 
 function effectivePromptProfile(cfg: config.Config): PromptProfile {
@@ -775,6 +838,10 @@ function effectivePromptProfile(cfg: config.Config): PromptProfile {
 
 function buildResumeSummary(sessionID: string, memory: string): string {
   return [`Resumed session ${sessionID}`, '', 'Previous session recap:', '', memory].join('\n');
+}
+
+function buildExitResumeHint(sessionID: string): string {
+  return `Resume this session: pentesterflow --resume ${sessionID}`;
 }
 
 function prettyCwd(): string {
@@ -819,7 +886,7 @@ Usage:
   pentesterflow [flags]
 
 Flags:
-  --backend ollama|lmstudio|openai-compat|kimi|groq|gemini
+  --backend ollama|lmstudio|openai-compat|kimi|groq|openrouter|deepseek|gemini
   --model <id>
   --base-url <url>
   --api-key <key>
@@ -830,7 +897,8 @@ Flags:
   --browser-ingest [port]    deprecated alias for --burp
   --no-stream                disable streaming chat (fallback for backends
                              whose SSE/ND-JSON path drops tool_calls)
-  --dangerously-skip-permissions   YOLO mode
+  --yolo                     YOLO mode: auto-approve non-sensitive tool calls
+                             (alias: --dangerously-skip-permissions)
   --list-skills / --list-tools
   --log <path>
   --debug-session           write a complete JSONL session debug log

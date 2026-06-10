@@ -1,13 +1,34 @@
 // Shell-result colorization tests. Same ESC-literal-avoidance pattern
 // as the markdown tests so Biome's noControlCharactersInRegex stays happy.
 
-import { describe, expect, it } from 'vitest';
-import {
-  buildToolResultView,
-  colorizeShellResult,
-  extractTextContent,
-  looksLikeShellResult,
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import type {
+  buildToolResultView as BuildToolResultView,
+  colorizeHTTPResult as ColorizeHTTPResult,
+  colorizeShellResult as ColorizeShellResult,
+  extractTextContent as ExtractTextContent,
+  looksLikeHTTPResult as LooksLikeHTTPResult,
+  looksLikeShellResult as LooksLikeShellResult,
 } from './toolResultFormat.js';
+
+let buildToolResultView: typeof BuildToolResultView;
+let colorizeHTTPResult: typeof ColorizeHTTPResult;
+let colorizeShellResult: typeof ColorizeShellResult;
+let extractTextContent: typeof ExtractTextContent;
+let looksLikeHTTPResult: typeof LooksLikeHTTPResult;
+let looksLikeShellResult: typeof LooksLikeShellResult;
+
+beforeAll(async () => {
+  vi.stubEnv('NO_COLOR', '');
+  ({
+    buildToolResultView,
+    colorizeHTTPResult,
+    colorizeShellResult,
+    extractTextContent,
+    looksLikeHTTPResult,
+    looksLikeShellResult,
+  } = await import('./toolResultFormat.js'));
+});
 
 const ESC = String.fromCharCode(0x1b);
 const stripAnsi = (s: string) => s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
@@ -181,5 +202,50 @@ describe('buildToolResultView', () => {
     // No JSON envelope leaks into the rendered preview.
     expect(stripAnsi(v.preview)).not.toContain('"type"');
     expect(stripAnsi(v.preview)).toContain('link "item 0"');
+  });
+});
+
+const HTTP_RESP = (status: string, body = '') =>
+  `HTTP/1.1 ${status}\ncontent-type: application/json\nserver: nginx\n\n${body}`;
+
+describe('looksLikeHTTPResult', () => {
+  it('recognises an HTTP response, rejects other shapes', () => {
+    expect(looksLikeHTTPResult('HTTP/1.1 200 OK\n\n{}')).toBe(true);
+    expect(looksLikeHTTPResult('HTTP/2 404 Not Found')).toBe(true);
+    expect(looksLikeHTTPResult('exit: 0\nstdout:\nhi')).toBe(false);
+    expect(looksLikeHTTPResult('just some text')).toBe(false);
+  });
+});
+
+describe('colorizeHTTPResult', () => {
+  it('colors 2xx green, 4xx yellow, 5xx red', () => {
+    expect(colorizeHTTPResult(HTTP_RESP('200 OK', '{"ok":true}'))).toContain(GREEN);
+    expect(colorizeHTTPResult(HTTP_RESP('403 Forbidden'))).toContain(YELLOW);
+    expect(colorizeHTTPResult(HTTP_RESP('500 Internal Server Error'))).toContain(RED);
+  });
+
+  it('keeps status line + header values readable', () => {
+    const stripped = stripAnsi(colorizeHTTPResult(HTTP_RESP('200 OK')));
+    expect(stripped).toContain('HTTP/1.1 200 OK');
+    expect(stripped).toContain('content-type: application/json');
+    expect(stripped).toContain('server: nginx');
+  });
+
+  it('does not change the line count (collapse accounting stays valid)', () => {
+    const body = HTTP_RESP('200 OK', '{"a":1}');
+    expect(colorizeHTTPResult(body).split('\n').length).toBe(body.split('\n').length);
+  });
+
+  it('passes a non-HTTP body through unchanged', () => {
+    expect(colorizeHTTPResult('not http')).toBe('not http');
+  });
+});
+
+describe('buildToolResultView routes HTTP results through the HTTP colorizer', () => {
+  it('colorizes an http tool-result', () => {
+    const raw = HTTP_RESP('301 Moved Permanently');
+    const view = buildToolResultView(raw);
+    expect(view.full).not.toBe(raw); // gained ANSI
+    expect(stripAnsi(view.full)).toContain('301 Moved Permanently');
   });
 });

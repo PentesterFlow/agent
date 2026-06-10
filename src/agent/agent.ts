@@ -54,6 +54,9 @@ export interface AgentOptions {
   streamingEnabled?: boolean;
   /** Local scan-intelligence dataset used to improve coverage across sessions. */
   intelligence?: IntelligenceStore | null;
+  /** Operator-authored engagement notes (from .pentesterflow/engagement.md),
+   *  always injected into the system prompt. Loaded once at startup. */
+  engagement?: string;
 }
 
 /** How many consecutive auto-compaction failures we tolerate before
@@ -61,8 +64,14 @@ export interface AgentOptions {
  *  want to retry it on every turn. */
 const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3;
 const COMPACTION_INPUT_CHAR_LIMIT = 22_000;
+// Upper bound on retained items per memory list, so a long engagement can't
+// grow the persisted checkpoint (and its disk footprint) without limit. The
+// most recent items win; dedup happens in mergeList. Lists default to a much
+// smaller cap (24) — findings/credentials get this larger one because losing
+// an early confirmed finding is worse than carrying a few extra lines.
+const MAX_MEMORY_LIST = 200;
 const COMPACTION_SYSTEM_PROMPT =
-  'Create a compact continuation memory for the same pentesting/coding session. Use concise Markdown with exactly these headings: Current objective, Target and scope, Decisions and assumptions, Tested surface, Findings and evidence, Files and commands, Credentials and placeholders, Open TODOs, Next best actions. Preserve exact endpoints, params, IDs, files, commands, tool results that matter, confirmed negatives, and reproduction evidence. Redact secrets but keep stable placeholders. Omit chatter and failed dead ends unless they prevent repeat work.';
+  'Create a compact continuation memory for the same pentesting/coding session. Use concise Markdown with exactly these headings: Current objective, Plan, Completed tasks, Target and scope, Decisions and assumptions, Tested surface, Findings and evidence, Files and commands, Credentials and placeholders, Open TODOs, Next best actions. Preserve exact endpoints, params, IDs, files, commands, tool results that matter, confirmed negatives, and reproduction evidence. Redact secrets but keep stable placeholders. Omit chatter and failed dead ends unless they prevent repeat work.';
 
 export class Agent {
   client: Client;
@@ -78,6 +87,10 @@ export class Agent {
   private sysPrompt: string;
   private history: Message[];
   private memory: SessionMemory | null = null;
+  // Operator-authored engagement notes (scope/rules/creds), loaded once at
+  // startup from .pentesterflow/engagement.md. Always injected into the system
+  // prompt — transcript-independent, so it survives compaction unconditionally.
+  private engagement: string;
   private autoCompactThreshold: number;
   private consecutiveCompactFailures = 0;
   private toolingProfile: ToolingProfile;
@@ -92,6 +105,9 @@ export class Agent {
   // the start of each run() so old skill restrictions don't bleed into
   // a fresh user prompt.
   private activeSkills: Set<string> = new Set();
+  // Skills explicitly invoked from slash commands before a turn starts.
+  // These become active at the start of the next run, then are cleared.
+  private pendingSkills: Set<string> = new Set();
 
   constructor(opts: AgentOptions) {
     this.client = opts.client;
@@ -107,12 +123,15 @@ export class Agent {
     this.toolingProfile = opts.toolingProfile ?? 'minimal';
     this.promptProfile = opts.promptProfile ?? 'full';
     this.streamingEnabled = opts.streamingEnabled ?? true;
+    this.engagement = opts.engagement ?? '';
     this.sysPrompt = buildSystemPrompt({
       skills: this.skills,
       thinkingEnabled: this.thinking,
       target: this.target,
       toolingProfile: this.toolingProfile,
       promptProfile: this.promptProfile,
+      memory: this.memory,
+      engagement: this.engagement,
     });
     this.history = [{ role: 'system', content: this.sysPrompt }];
   }
@@ -152,6 +171,8 @@ export class Agent {
     out.push(`Session memory · ${m.compactions} compaction${m.compactions === 1 ? '' : 's'}`);
     if (m.lastCompactedAt) out.push(`Last compacted: ${m.lastCompactedAt}`);
     appendMemorySection(out, 'Objectives', m.objectives);
+    appendMemorySection(out, 'Plan', m.plan);
+    appendMemorySection(out, 'Completed', m.completed);
     appendMemorySection(out, 'Findings', m.findings);
     appendMemorySection(out, 'Tested surface', m.tested);
     appendMemorySection(out, 'Files', m.files);
@@ -159,6 +180,56 @@ export class Agent {
     appendMemorySection(out, 'Credentials / placeholders', m.credentials);
     appendMemorySection(out, 'TODOs', m.todos);
     return out.join('\n');
+  }
+
+  /**
+   * Wipe the auto-generated session memory. The escape hatch for when a bad
+   * compaction summary poisoned the carried state — the next /compact rebuilds
+   * it from scratch. Operator-authored engagement notes are untouched (they
+   * live in a file, not here).
+   */
+  async clearMemory(): Promise<void> {
+    if (!this.memory || countMemoryItems(this.memory) === 0) return;
+    this.memory = null;
+    this.rebuildSystemPrompt();
+    this.history = ensureSystemPrompt(this.history, this.sysPrompt);
+    await this.save();
+  }
+
+  /**
+   * Remove individual memory items whose text contains `query`
+   * (case-insensitive) across every list, so a single wrong line can be
+   * dropped without nuking the whole checkpoint. Returns the removed items.
+   */
+  async forgetMemory(query: string): Promise<string[]> {
+    const needle = query.trim().toLowerCase();
+    if (!needle || !this.memory) return [];
+    const removed: string[] = [];
+    const prune = (items: string[]): string[] =>
+      items.filter((item) => {
+        if (item.toLowerCase().includes(needle)) {
+          removed.push(item);
+          return false;
+        }
+        return true;
+      });
+    this.memory = {
+      ...this.memory,
+      objectives: prune(this.memory.objectives),
+      plan: prune(this.memory.plan),
+      completed: prune(this.memory.completed),
+      findings: prune(this.memory.findings),
+      tested: prune(this.memory.tested),
+      files: prune(this.memory.files),
+      commands: prune(this.memory.commands),
+      credentials: prune(this.memory.credentials),
+      todos: prune(this.memory.todos),
+    };
+    if (removed.length === 0) return [];
+    this.rebuildSystemPrompt();
+    this.history = ensureSystemPrompt(this.history, this.sysPrompt);
+    await this.save();
+    return removed;
   }
 
   async saveContextSnapshot(reason = 'periodic'): Promise<string> {
@@ -304,7 +375,7 @@ export class Agent {
     });
     // Track as active so the allowed-tools enforcer treats this skill as
     // loaded for the upcoming turn.
-    this.activeSkills.add(name);
+    this.pendingSkills.add(name);
     await this.save();
     return name;
   }
@@ -384,6 +455,10 @@ export class Agent {
     // previously-loaded skills should go too, otherwise the user is
     // stuck with a stale allowlist on a fresh session.
     this.activeSkills.clear();
+    this.pendingSkills.clear();
+    // Clear the auto-compact circuit breaker so a fresh session isn't born with
+    // compaction already disabled from a previous session's failures (M4).
+    this.consecutiveCompactFailures = 0;
     if (this.store) await this.store.clear();
   }
 
@@ -407,7 +482,9 @@ export class Agent {
       this.history = [{ role: 'system', content: this.sysPrompt }];
       return;
     }
-    this.history = ensureSystemPrompt(loaded.messages, this.sysPrompt);
+    // Repair any dangling tool_calls a prior session aborted mid-loop, else
+    // the first resumed request 400s on an unanswered call (H6).
+    this.history = reconcileToolCalls(ensureSystemPrompt(loaded.messages, this.sysPrompt));
   }
 
   async setTargetBaseURL(u: string): Promise<void> {
@@ -478,6 +555,14 @@ export class Agent {
         return;
       }
       this.memory = mergeMemory(this.memory, summary);
+      // Fold the freshly merged checkpoint into the system prompt before it is
+      // seeded into the reset history below, so accumulated state survives this
+      // compaction (and every restart) instead of only the latest summary.
+      this.rebuildSystemPrompt();
+      // A successful manual /compact proves compaction works again, so clear
+      // the auto-compact circuit breaker that prior auto failures may have
+      // tripped — otherwise it stays disabled for the whole process (M4).
+      this.consecutiveCompactFailures = 0;
       await this.learnIntelligence(summary);
       this.history = [
         { role: 'system', content: this.sysPrompt },
@@ -508,15 +593,32 @@ export class Agent {
     emit: EventSink,
     opts?: AgentRunOptions,
   ): Promise<void> {
+    this.activeSkills = new Set(this.pendingSkills);
+    this.pendingSkills.clear();
+
+    // Repair any dangling assistant tool_calls left by a previously aborted
+    // turn before this turn's user message is appended, so the request we send
+    // (and the next save) can't carry an unanswered tool call into a provider
+    // 400 (H6).
+    this.history = reconcileToolCalls(this.history);
+
+    // Expand @file mentions once. The expanded text is both what we size this
+    // turn against for the auto-compact gate (M5 — a large @file attachment
+    // must count toward the threshold) and the content actually sent below.
+    const expandedUserMsg = expandFileMentions(userMsg);
+    const incomingTokens = Math.floor(Buffer.byteLength(expandedUserMsg, 'utf8') / 4);
+
     // Auto-compact gate. Run BEFORE we add the new user message so the
     // compaction summary doesn't include this turn's question — the
     // user expects their prompt to be answered, not summarized away.
-    // Circuit breaker: stop retrying if we've failed N times in a row;
-    // the user can still call /compact manually to investigate.
+    // Includes the incoming (post-expansion) message size so a near-threshold
+    // turn plus a large attachment can't blow past the context window with no
+    // compaction (M5). Circuit breaker: stop retrying if we've failed N times
+    // in a row; the user can still call /compact manually to investigate.
     if (
       this.autoCompactThreshold > 0 &&
       this.consecutiveCompactFailures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES &&
-      this.approxTokens() >= this.autoCompactThreshold
+      this.approxTokens() + incomingTokens >= this.autoCompactThreshold
     ) {
       await this.autoCompact(signal, emit);
     }
@@ -550,7 +652,7 @@ export class Agent {
     if (intelligenceContext && last) {
       working.splice(working.length - 1, 0, { role: 'system', content: intelligenceContext });
     }
-    if (last) last.content = expandFileMentions(userMsg);
+    if (last) last.content = expandedUserMsg;
 
     const maxSteps = this.maxSteps;
     for (let step = 0; step < maxSteps; step += 1) {
@@ -772,6 +874,9 @@ export class Agent {
       throw new Error('compact returned empty summary');
     }
     this.memory = mergeMemory(this.memory, summary);
+    // Fold the merged checkpoint into the system prompt before seeding the
+    // reset history, so cumulative state (not just this summary) rides forward.
+    this.rebuildSystemPrompt();
     await this.learnIntelligence(summary);
     this.history = [
       { role: 'system', content: this.sysPrompt },
@@ -791,6 +896,8 @@ export class Agent {
       target: this.target,
       toolingProfile: this.toolingProfile,
       promptProfile: this.promptProfile,
+      memory: this.memory,
+      engagement: this.engagement,
     });
   }
 
@@ -836,6 +943,50 @@ function ensureSystemPrompt(messages: Message[], prompt: string): Message[] {
   return [{ role: 'system', content: prompt }, ...messages.slice(1)];
 }
 
+/**
+ * Repair dangling tool calls. The OpenAI/Kimi/etc. wire format requires every
+ * assistant `tool_calls` entry to be answered by a following `role:'tool'`
+ * message with the matching id before the next user/assistant turn. A turn
+ * aborted (Esc) between emitting the assistant tool_calls and recording the
+ * tool results leaves an unanswered call on disk; replaying it provokes a hard
+ * 400 that wedges the session until /reset. This synthesizes a result for any
+ * unanswered call so the history is always valid to resend. Returns a repaired
+ * copy (the input is not mutated); a no-op when nothing is dangling.
+ */
+export function reconcileToolCalls(messages: Message[]): Message[] {
+  const out: Message[] = [];
+  for (let i = 0; i < messages.length; i += 1) {
+    const m = messages[i];
+    if (!m) continue;
+    out.push(m);
+    if (m.role !== 'assistant' || !m.toolCalls || m.toolCalls.length === 0) continue;
+
+    // Consume the tool results that immediately follow this assistant message.
+    const answered = new Set<string>();
+    let j = i + 1;
+    for (; j < messages.length; j += 1) {
+      const next = messages[j];
+      if (!next || next.role !== 'tool') break;
+      if (next.toolCallID) answered.add(next.toolCallID);
+      out.push(next);
+    }
+    // Synthesize a result for any call the aborted turn never answered.
+    for (const tc of m.toolCalls) {
+      if (tc.id && !answered.has(tc.id)) {
+        out.push({
+          role: 'tool',
+          content:
+            'ERROR: tool call did not complete (the turn was interrupted before this tool produced a result).',
+          toolCallID: tc.id,
+          name: tc.function?.name,
+        });
+      }
+    }
+    i = j - 1;
+  }
+  return out;
+}
+
 function buildTurnLearningText(userMsg: string, assistantMsg: string): string {
   return [
     '## User preferences and working style',
@@ -853,6 +1004,8 @@ function emptyMemory(): SessionMemory {
     updatedAt: now,
     compactions: 0,
     objectives: [],
+    plan: [],
+    completed: [],
     findings: [],
     tested: [],
     files: [],
@@ -872,11 +1025,13 @@ function mergeMemory(prev: SessionMemory | null, summary: string): SessionMemory
     lastSummary: summary,
     compactions: (prev?.compactions ?? 0) + 1,
     objectives: mergeList(prev?.objectives, parsed.objectives),
-    findings: mergeList(prev?.findings, parsed.findings),
+    plan: mergeList(prev?.plan, parsed.plan),
+    completed: mergeList(prev?.completed, parsed.completed),
+    findings: mergeList(prev?.findings, parsed.findings, MAX_MEMORY_LIST),
     tested: mergeList(prev?.tested, parsed.tested),
     files: mergeList(prev?.files, parsed.files),
     commands: mergeList(prev?.commands, parsed.commands),
-    credentials: mergeList(prev?.credentials, parsed.credentials),
+    credentials: mergeList(prev?.credentials, parsed.credentials, MAX_MEMORY_LIST),
     todos: mergeList(prev?.todos, parsed.todos),
   };
 }
@@ -890,6 +1045,8 @@ function parseCompactionSummary(
   const sections = splitMarkdownSections(summary);
   return {
     objectives: sectionItems(sections, ['current objective', 'target and scope']),
+    plan: sectionItems(sections, ['plan']),
+    completed: sectionItems(sections, ['completed tasks']),
     findings: sectionItems(sections, ['findings and evidence']),
     tested: sectionItems(sections, ['tested surface', 'decisions and assumptions']),
     files: sectionItems(sections, ['files and commands']).filter((s) =>
@@ -946,13 +1103,15 @@ function mergeList(prev: string[] | undefined, next: string[], cap = 24): string
     seen.add(key);
     out.push(clean.length > 240 ? `${clean.slice(0, 239)}…` : clean);
   }
-  return out.slice(-cap);
+  return Number.isFinite(cap) ? out.slice(-cap) : out;
 }
 
 function countMemoryItems(memory: SessionMemory | null): number {
   if (!memory) return 0;
   return (
     memory.objectives.length +
+    memory.plan.length +
+    memory.completed.length +
     memory.findings.length +
     memory.tested.length +
     memory.files.length +

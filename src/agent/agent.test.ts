@@ -11,11 +11,12 @@ import { IntelligenceStore } from '../intelligence/store.js';
 import type { Client } from '../llm/client.js';
 import type { ChatRequest, ChatResponse } from '../llm/types.js';
 import { AlwaysAllow } from '../permission/permission.js';
+import { Store as SessionStore, newID as newSessionID } from '../session/store.js';
 import { Registry as SkillRegistry } from '../skills/registry.js';
 import { Target } from '../target/target.js';
 import { Registry as ToolRegistry } from '../tools/registry.js';
 import type { Tool } from '../tools/types.js';
-import { Agent } from './agent.js';
+import { Agent, reconcileToolCalls } from './agent.js';
 import type { AgentEvent } from './events.js';
 
 // Minimal fake client: scripted responses cycled per chat() call.
@@ -450,6 +451,211 @@ describe('Agent.run', () => {
     expect(memory).toContain('Confirmed IDOR');
     expect(memory).toContain('USER_A_TOKEN');
     expect(agent.getMemoryStats().items).toBeGreaterThan(0);
+  });
+
+  it('parses Plan and Completed tasks headings into structured memory', async () => {
+    const summary = [
+      '## Current objective',
+      '- Test authz on orders API',
+      '## Plan',
+      '- Map endpoints, then probe IDOR, then privilege escalation',
+      '## Completed tasks',
+      '- Enumerated the orders and invoices endpoints',
+      '## Open TODOs',
+      '- Probe the export endpoint next',
+    ].join('\n');
+    const { agent } = makeAgentWithClient([
+      { message: { role: 'assistant', content: 'first turn' }, finishReason: 'stop' },
+      { message: { role: 'assistant', content: summary }, finishReason: 'stop' },
+    ]);
+    const { sink } = collect();
+    await agent.run('start', new AbortController().signal, sink);
+    await agent.compact(new AbortController().signal, sink);
+
+    const memory = agent.formatMemory();
+    expect(memory).toContain('Plan');
+    expect(memory).toContain('Map endpoints, then probe IDOR');
+    expect(memory).toContain('Completed');
+    expect(memory).toContain('Enumerated the orders and invoices endpoints');
+  });
+
+  it('injects carried memory into the system prompt after compaction', async () => {
+    const summary = [
+      '## Current objective',
+      '- Test horizontal authorization on orders API',
+      '## Findings and evidence',
+      '- Confirmed IDOR on GET /api/invoices/200',
+    ].join('\n');
+    const { agent } = makeAgentWithClient([
+      { message: { role: 'assistant', content: 'first turn' }, finishReason: 'stop' },
+      { message: { role: 'assistant', content: summary }, finishReason: 'stop' },
+    ]);
+    const { sink } = collect();
+    await agent.run('start', new AbortController().signal, sink);
+    await agent.compact(new AbortController().signal, sink);
+
+    // The system prompt (history[0]) is sent on every request — carried state
+    // must live there so it survives the next compaction, not just in the
+    // throwaway summary user-message.
+    const systemPrompt = agent.getHistory()[0]?.content ?? '';
+    expect(systemPrompt).toContain('Carried session state');
+    expect(systemPrompt).toContain('Confirmed IDOR on GET /api/invoices/200');
+  });
+
+  it('accumulates earlier compactions in the system prompt across a second compaction', async () => {
+    const first = '## Findings and evidence\n- Finding from compaction ONE';
+    const second = '## Findings and evidence\n- Finding from compaction TWO';
+    const { agent } = makeAgentWithClient([
+      { message: { role: 'assistant', content: 'turn 1' }, finishReason: 'stop' },
+      { message: { role: 'assistant', content: first }, finishReason: 'stop' },
+      { message: { role: 'assistant', content: 'turn 2' }, finishReason: 'stop' },
+      { message: { role: 'assistant', content: second }, finishReason: 'stop' },
+    ]);
+    const { sink } = collect();
+    await agent.run('first', new AbortController().signal, sink);
+    await agent.compact(new AbortController().signal, sink);
+    await agent.run('second', new AbortController().signal, sink);
+    await agent.compact(new AbortController().signal, sink);
+
+    const systemPrompt = agent.getHistory()[0]?.content ?? '';
+    // Both findings reach the model even though only the latest summary lives
+    // in the history user-message — this is the duplicate-work fix.
+    expect(systemPrompt).toContain('Finding from compaction ONE');
+    expect(systemPrompt).toContain('Finding from compaction TWO');
+  });
+
+  it('restores carried memory into the system prompt on resume', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'pf-agent-resume-'));
+    try {
+      const id = newSessionID();
+      const summary = [
+        '## Current objective',
+        '- Test horizontal authorization on orders API',
+        '## Findings and evidence',
+        '- Confirmed IDOR on GET /api/invoices/200',
+      ].join('\n');
+
+      const tools = new ToolRegistry();
+      const first = new Agent({
+        client: new FakeClient([
+          { message: { role: 'assistant', content: 'first turn' }, finishReason: 'stop' },
+          { message: { role: 'assistant', content: summary }, finishReason: 'stop' },
+        ]),
+        tools,
+        skills: new SkillRegistry(),
+        prompter: new AlwaysAllow(),
+        store: SessionStore.newWithID(tmp, id),
+        target: new Target(),
+      });
+      const { sink } = collect();
+      await first.run('start', new AbortController().signal, sink);
+      await first.compact(new AbortController().signal, sink);
+
+      // Fresh process: a new Agent pointed at the same saved session.
+      const resumed = new Agent({
+        client: new FakeClient([]),
+        tools: new ToolRegistry(),
+        skills: new SkillRegistry(),
+        prompter: new AlwaysAllow(),
+        store: SessionStore.newWithID(tmp, id),
+        target: new Target(),
+      });
+      resumed.resumeSaved();
+
+      const systemPrompt = resumed.getHistory()[0]?.content ?? '';
+      expect(systemPrompt).toContain('Carried session state');
+      expect(systemPrompt).toContain('Confirmed IDOR on GET /api/invoices/200');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('injects operator-authored engagement notes into the system prompt', () => {
+    const agent = new Agent({
+      client: new FakeClient([]),
+      tools: new ToolRegistry(),
+      skills: new SkillRegistry(),
+      prompter: new AlwaysAllow(),
+      store: null,
+      target: new Target(),
+      engagement: 'Out of scope: *.corp.internal\nTest account: USER_A_TOKEN',
+    });
+    const systemPrompt = agent.getHistory()[0]?.content ?? '';
+    expect(systemPrompt).toContain('Engagement notes (operator-authored');
+    expect(systemPrompt).toContain('Out of scope: *.corp.internal');
+  });
+
+  it('renders a staleness caveat above the carried memory block', async () => {
+    const summary = '## Findings and evidence\n- Confirmed IDOR on /api/invoices/200';
+    const { agent } = makeAgentWithClient([
+      { message: { role: 'assistant', content: 'turn' }, finishReason: 'stop' },
+      { message: { role: 'assistant', content: summary }, finishReason: 'stop' },
+    ]);
+    const { sink } = collect();
+    await agent.run('start', new AbortController().signal, sink);
+    await agent.compact(new AbortController().signal, sink);
+    expect(agent.getHistory()[0]?.content ?? '').toContain('verify it still holds');
+  });
+
+  it('clearMemory wipes the carried state from the system prompt', async () => {
+    const summary = '## Findings and evidence\n- Confirmed IDOR on /api/invoices/200';
+    const { agent } = makeAgentWithClient([
+      { message: { role: 'assistant', content: 'turn' }, finishReason: 'stop' },
+      { message: { role: 'assistant', content: summary }, finishReason: 'stop' },
+    ]);
+    const { sink } = collect();
+    await agent.run('start', new AbortController().signal, sink);
+    await agent.compact(new AbortController().signal, sink);
+    expect(agent.getHistory()[0]?.content ?? '').toContain('Confirmed IDOR');
+
+    await agent.clearMemory();
+    expect(agent.getHistory()[0]?.content ?? '').not.toContain('Carried session state');
+    expect(agent.getMemoryStats().items).toBe(0);
+  });
+
+  it('forgetMemory drops only matching items from the carried state', async () => {
+    const summary = [
+      '## Findings and evidence',
+      '- Confirmed IDOR on /api/invoices/200',
+      '- XSS in the search box',
+    ].join('\n');
+    const { agent } = makeAgentWithClient([
+      { message: { role: 'assistant', content: 'turn' }, finishReason: 'stop' },
+      { message: { role: 'assistant', content: summary }, finishReason: 'stop' },
+    ]);
+    const { sink } = collect();
+    await agent.run('start', new AbortController().signal, sink);
+    await agent.compact(new AbortController().signal, sink);
+
+    const removed = await agent.forgetMemory('IDOR');
+    expect(removed).toHaveLength(1);
+    const systemPrompt = agent.getHistory()[0]?.content ?? '';
+    expect(systemPrompt).not.toContain('Confirmed IDOR');
+    expect(systemPrompt).toContain('XSS in the search box');
+  });
+
+  it('caps the findings list so a long engagement cannot grow unbounded', async () => {
+    const scripted: ChatResponse[] = [];
+    // 250 compactions, each adding one unique finding (> the 200 cap).
+    const total = 250;
+    for (let i = 0; i < total; i += 1) {
+      scripted.push({ message: { role: 'assistant', content: `turn ${i}` }, finishReason: 'stop' });
+      scripted.push({
+        message: { role: 'assistant', content: `## Findings and evidence\n- finding number ${i}` },
+        finishReason: 'stop',
+      });
+    }
+    const { agent } = makeAgentWithClient(scripted);
+    for (let i = 0; i < total; i += 1) {
+      const { sink } = collect();
+      await agent.run(`turn ${i}`, new AbortController().signal, sink);
+      await agent.compact(new AbortController().signal, sink);
+    }
+    // formatMemory only shows the last 8, so assert via stats: total items is
+    // bounded (findings capped at 200; the single objective-less summary adds
+    // nothing else of size). The newest finding must still be present.
+    expect(agent.getMemoryStats().items).toBeLessThanOrEqual(200);
+    expect(agent.formatMemory()).toContain(`finding number ${total - 1}`);
   });
 
   it('bounds oversized compaction input so small-TPM providers can recover', async () => {
@@ -891,5 +1097,123 @@ describe('Agent.run', () => {
     expect(bashResult && bashResult.type === 'tool-result' ? bashResult.result : '').toContain(
       'bashed: id',
     );
+  });
+
+  it('does not carry active skill tool restrictions into the next turn', async () => {
+    const { agent, events, sink } = makeAgentWithSkill(
+      [
+        {
+          message: {
+            role: 'assistant',
+            content: '',
+            toolCalls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'load_skill', arguments: JSON.stringify({ name: 'narrow' }) },
+              },
+            ],
+          },
+          finishReason: 'tool_calls',
+        },
+        { message: { role: 'assistant', content: 'first done' }, finishReason: 'stop' },
+        {
+          message: {
+            role: 'assistant',
+            content: '',
+            toolCalls: [
+              {
+                id: 'call_2',
+                type: 'function',
+                function: { name: 'shell', arguments: JSON.stringify({ command: 'id' }) },
+              },
+            ],
+          },
+          finishReason: 'tool_calls',
+        },
+        { message: { role: 'assistant', content: 'second done' }, finishReason: 'stop' },
+      ],
+      ['echo'],
+    );
+
+    await agent.run('first', new AbortController().signal, sink);
+    await agent.run('second', new AbortController().signal, sink);
+
+    const shellResult = events.find((e) => e.type === 'tool-result' && e.name === 'shell');
+    expect(shellResult && shellResult.type === 'tool-result' ? shellResult.err : '').toBe('');
+    expect(shellResult && shellResult.type === 'tool-result' ? shellResult.result : '').toContain(
+      'ran:',
+    );
+  });
+});
+
+describe('reconcileToolCalls (H6)', () => {
+  const asst = (...ids: string[]) => ({
+    role: 'assistant' as const,
+    content: '',
+    toolCalls: ids.map((id) => ({
+      id,
+      type: 'function' as const,
+      function: { name: `tool_${id}`, arguments: '{}' },
+    })),
+  });
+  const toolMsg = (id: string) => ({
+    role: 'tool' as const,
+    content: 'ok',
+    toolCallID: id,
+    name: `tool_${id}`,
+  });
+
+  it('synthesizes a result for an unanswered tool call', () => {
+    const out = reconcileToolCalls([
+      { role: 'system', content: 's' },
+      { role: 'user', content: 'u' },
+      asst('a', 'b'),
+      toolMsg('a'),
+    ]);
+    // a synthetic tool(b) result must be appended right after tool(a)
+    expect(out.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'tool', 'tool']);
+    const synth = out[4];
+    expect(synth?.role).toBe('tool');
+    expect(synth?.toolCallID).toBe('b');
+    expect(synth?.name).toBe('tool_b');
+    expect(synth?.content).toMatch(/did not complete/i);
+  });
+
+  it('is a no-op when every tool call is answered', () => {
+    const input = [
+      { role: 'system' as const, content: 's' },
+      asst('a', 'b'),
+      toolMsg('a'),
+      toolMsg('b'),
+    ];
+    const out = reconcileToolCalls(input);
+    expect(out).toHaveLength(input.length);
+    expect(out.map((m) => m.toolCallID)).toEqual([undefined, undefined, 'a', 'b']);
+  });
+
+  it('repairs a dangling call mid-history without dropping later turns', () => {
+    const out = reconcileToolCalls([
+      asst('a'), // never answered
+      { role: 'user', content: 'next turn' },
+      asst('b'),
+      toolMsg('b'),
+    ]);
+    expect(out.map((m) => `${m.role}:${m.toolCallID ?? ''}`)).toEqual([
+      'assistant:',
+      'tool:a', // synthesized, inserted before the user turn
+      'user:',
+      'assistant:',
+      'tool:b',
+    ]);
+  });
+
+  it('leaves a plain conversation untouched', () => {
+    const input = [
+      { role: 'system' as const, content: 's' },
+      { role: 'user' as const, content: 'hi' },
+      { role: 'assistant' as const, content: 'hello' },
+    ];
+    expect(reconcileToolCalls(input)).toEqual(input);
   });
 });

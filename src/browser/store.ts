@@ -92,6 +92,11 @@ interface EndpointRecord {
 export interface CaptureStoreOptions {
   maxEntries?: number;
 }
+const BODY_STRING_CAP = 64 * 1024;
+// Bound the endpoint metadata so a long capture of attacker-influenced traffic
+// with unique paths/param names can't grow memory without limit (M9).
+const MAX_ENDPOINTS = 2000;
+const MAX_PARAMS_PER_ENDPOINT = 256;
 
 export class CaptureStore {
   private readonly requests: Map<string, CapturedRequest> = new Map();
@@ -145,8 +150,8 @@ export class CaptureStore {
       fromCache: typeof obj.fromCache === 'boolean' ? obj.fromCache : undefined,
       requestHeaders: this.coerceHeaders(obj.requestHeaders ?? obj.reqHeaders),
       responseHeaders: this.coerceHeaders(obj.responseHeaders ?? obj.respHeaders),
-      requestBody: obj.requestBody ?? obj.reqBody ?? undefined,
-      responseBody: typeof obj.respBody === 'string' ? obj.respBody : undefined,
+      requestBody: capBody(obj.requestBody ?? obj.reqBody ?? undefined),
+      responseBody: typeof obj.respBody === 'string' ? capString(obj.respBody) : undefined,
       timeStart: typeof obj.timeStart === 'number' ? obj.timeStart : undefined,
       timeEnd: typeof obj.timeEnd === 'number' ? obj.timeEnd : undefined,
       elapsedMs: typeof obj.elapsedMs === 'number' ? obj.elapsedMs : undefined,
@@ -169,7 +174,8 @@ export class CaptureStore {
       url: obj.url,
       title: typeof obj.title === 'string' ? obj.title : undefined,
       userAgent: typeof obj.userAgent === 'string' ? obj.userAgent : undefined,
-      documentCookie: typeof obj.documentCookie === 'string' ? obj.documentCookie : undefined,
+      documentCookie:
+        typeof obj.documentCookie === 'string' ? capString(obj.documentCookie) : undefined,
       cookies: Array.isArray(obj.cookies) ? obj.cookies : undefined,
       localStorage: this.coerceStringMap(obj.localStorage),
       sessionStorage: this.coerceStringMap(obj.sessionStorage),
@@ -350,7 +356,11 @@ export class CaptureStore {
     const noQuery = this.urlNoQuery(url);
     const key = `${method} ${noQuery}`;
     let rec = this.endpoints.get(key);
-    if (!rec) {
+    if (rec) {
+      // Re-insert so Map iteration order tracks recency (LRU): delete now,
+      // set again below at the most-recent position.
+      this.endpoints.delete(key);
+    } else {
       rec = {
         method,
         url: noQuery,
@@ -360,13 +370,35 @@ export class CaptureStore {
         firstSeen: Date.now(),
         lastSeen: Date.now(),
       };
-      this.endpoints.set(key, rec);
     }
+    this.endpoints.set(key, rec);
     rec.hitCount += 1;
     rec.lastSeen = Date.now();
+    // Cap each param Set so a single endpoint hit with thousands of distinct
+    // param names can't grow unbounded.
     const qp = queryParamsHint ?? this.queryParams(url);
-    for (const q of qp) rec.queryParams.add(q);
-    for (const b of this.bodyParamNames(body)) rec.bodyParams.add(b);
+    for (const q of qp) {
+      if (rec.queryParams.size >= MAX_PARAMS_PER_ENDPOINT) break;
+      rec.queryParams.add(q);
+    }
+    for (const b of this.bodyParamNames(body)) {
+      if (rec.bodyParams.size >= MAX_PARAMS_PER_ENDPOINT) break;
+      rec.bodyParams.add(b);
+    }
+    this.pruneEndpointsIfNeeded();
+  }
+
+  // Evict least-recently-seen endpoints once over the cap. Map iteration order
+  // is recency order (recordEndpoint re-inserts on each hit), so the oldest
+  // entries sit at the front.
+  private pruneEndpointsIfNeeded(): void {
+    if (this.endpoints.size <= MAX_ENDPOINTS) return;
+    const drop = this.endpoints.size - MAX_ENDPOINTS;
+    let i = 0;
+    for (const k of this.endpoints.keys()) {
+      if (i++ >= drop) break;
+      this.endpoints.delete(k);
+    }
   }
 
   private urlNoQuery(url: string): string {
@@ -476,4 +508,20 @@ export class CaptureStore {
       this.requests.delete(k);
     }
   }
+}
+
+function capBody(value: unknown): unknown {
+  if (typeof value === 'string') return capString(value);
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(capBody);
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = capBody(item);
+  }
+  return out;
+}
+
+function capString(value: string): string {
+  if (value.length <= BODY_STRING_CAP) return value;
+  return `${value.slice(0, BODY_STRING_CAP)}...<truncated ${value.length - BODY_STRING_CAP} chars>`;
 }

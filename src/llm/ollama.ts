@@ -31,6 +31,7 @@ interface OllamaChatResp {
   message?: OllamaMessage;
   done?: boolean;
 }
+const CHAT_TIMEOUT_MS = 10 * 60 * 1000;
 
 export class OllamaClient implements Client, StreamingClient, Pinger {
   readonly baseURL: string;
@@ -63,13 +64,14 @@ export class OllamaClient implements Client, StreamingClient, Pinger {
 
   async chat(req: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
     const body = this.encodeRequest(req, false);
+    const combinedSignal = withTimeout(signal, CHAT_TIMEOUT_MS);
     let resp: Response;
     try {
       resp = await fetch(`${this.baseURL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal,
+        signal: combinedSignal,
       });
     } catch (err) {
       throw classifyBackend('ollama', err, 0, undefined);
@@ -78,7 +80,12 @@ export class OllamaClient implements Client, StreamingClient, Pinger {
     if (resp.status !== 200) {
       throw classifyBackend('ollama', null, resp.status, raw);
     }
-    const parsed = JSON.parse(raw) as OllamaChatResp;
+    let parsed: OllamaChatResp;
+    try {
+      parsed = JSON.parse(raw) as OllamaChatResp;
+    } catch {
+      throw classifyBackend('ollama', null, resp.status, `invalid JSON from ollama: ${raw}`);
+    }
     return this.assembleResponse(parsed.message ?? { role: 'assistant', content: '' }, req.tools);
   }
 
@@ -88,13 +95,14 @@ export class OllamaClient implements Client, StreamingClient, Pinger {
     signal?: AbortSignal,
   ): Promise<ChatResponse> {
     const body = this.encodeRequest(req, true);
+    const combinedSignal = withTimeout(signal, CHAT_TIMEOUT_MS);
     let resp: Response;
     try {
       resp = await fetch(`${this.baseURL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal,
+        signal: combinedSignal,
       });
     } catch (err) {
       throw classifyBackend('ollama', err, 0, undefined);
@@ -218,49 +226,8 @@ function parseJSONFromContent(content: string): unknown {
   try {
     return JSON.parse(candidate);
   } catch {
-    const sliced = sliceFirstJSONValue(candidate);
-    if (!sliced) return undefined;
-    try {
-      return JSON.parse(sliced);
-    } catch {
-      return undefined;
-    }
+    return undefined;
   }
-}
-
-function sliceFirstJSONValue(input: string): string | undefined {
-  const start = input.search(/[\[{]/);
-  if (start < 0) return undefined;
-
-  const stack: string[] = [];
-  let inString = false;
-  let escaped = false;
-
-  for (let i = start; i < input.length; i += 1) {
-    const ch = input[i];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === '\\') {
-        escaped = true;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-      continue;
-    }
-    if (ch === '{') stack.push('}');
-    if (ch === '[') stack.push(']');
-    if (ch === '}' || ch === ']') {
-      if (stack.pop() !== ch) return undefined;
-      if (stack.length === 0) return input.slice(start, i + 1);
-    }
-  }
-
-  return undefined;
 }
 
 function normalizeToolCalls(value: unknown, knownTools: Set<string>): OllamaToolCall[] {
@@ -348,17 +315,27 @@ async function* iterLines(body: ReadableStream<Uint8Array>): AsyncIterable<strin
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx = buffer.indexOf('\n');
-    while (idx >= 0) {
-      yield buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 1);
-      idx = buffer.indexOf('\n');
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx = buffer.indexOf('\n');
+      while (idx >= 0) {
+        yield buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        idx = buffer.indexOf('\n');
+      }
     }
+    buffer += decoder.decode();
+    if (buffer.length > 0) yield buffer;
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  buffer += decoder.decode();
-  if (buffer.length > 0) yield buffer;
+}
+
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  if (!signal) return timeout;
+  return AbortSignal.any([signal, timeout]);
 }

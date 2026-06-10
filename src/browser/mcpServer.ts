@@ -11,8 +11,8 @@
 //   other clients──┼── stdio MCP ──► this process ──► CaptureStore ◄── HTTP /ingest ──── Chrome extension
 //   pentesterflow─┘
 //
-// The ingest HTTP server binds 127.0.0.1 only. No fan-out, no auth — this
-// is a single-user local-dev tool by design.
+// The ingest HTTP server binds 127.0.0.1 only and requires a per-process
+// token in X-Pentesterflow-Token.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -109,7 +109,7 @@ async function main(): Promise<number> {
     const handle = await startIngestServer({ store, port: args.port });
     ingestUrl = handle.url;
     process.stderr.write(
-      `[pentesterflow-browser-mcp] ingest listening at ${handle.url}/ingest\n[pentesterflow-browser-mcp] in the Chrome extension Options, set forwardUrl to this base URL.\n`,
+      `[pentesterflow-browser-mcp] ingest listening at ${handle.url}/ingest\n[pentesterflow-browser-mcp] token: ${handle.token}\n[pentesterflow-browser-mcp] configure the Chrome extension with this base URL and token.\n`,
     );
     const close = async () => {
       logger.info('browser-mcp shutdown');

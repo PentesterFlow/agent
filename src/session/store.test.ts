@@ -65,6 +65,8 @@ describe('session.Store', () => {
       lastCompactedAt: '2026-06-02T00:00:00.000Z',
       lastSummary: 'summary',
       objectives: ['test authz'],
+      plan: ['enumerate auth endpoints, then test IDOR'],
+      completed: ['mapped auth surface'],
       findings: ['idor on /api/orders/1'],
       tested: ['GET /api/orders/:id as user A/B'],
       files: ['findings/idor.md'],

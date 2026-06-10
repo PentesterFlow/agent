@@ -4,10 +4,11 @@
 
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import fg from 'fast-glob';
 import type { Prompter } from '../permission/permission.js';
+import { gateSensitivePath } from './file.js';
 import { type Tool, argBool, argNumber, argString } from './types.js';
 
 const GREP_FILE_BYTE_CAP = 5 * 1024 * 1024;
@@ -53,13 +54,18 @@ export class GlobTool implements Tool {
     return false;
   }
 
-  async run(args: Record<string, unknown>, signal: AbortSignal, _p: Prompter): Promise<string> {
+  async run(args: Record<string, unknown>, signal: AbortSignal, p: Prompter): Promise<string> {
     const pattern = argString(args, 'pattern');
     if (!pattern) throw new Error('pattern is required');
     const base = argString(args, 'path') || '.';
     const limit = Math.max(1, Math.floor(argNumber(args, 'limit') ?? 200));
 
+    await gateSearchInputs(p, base, pattern, signal);
+
     const matches = await globFiles(base, pattern, limit, signal);
+    for (const file of matches) {
+      await gateSensitivePath(p, file, 'search', signal);
+    }
     if (matches.length === 0) return 'no matches';
     return matches.join('\n');
   }
@@ -92,7 +98,7 @@ export class GrepTool implements Tool {
     return false;
   }
 
-  async run(args: Record<string, unknown>, signal: AbortSignal, _p: Prompter): Promise<string> {
+  async run(args: Record<string, unknown>, signal: AbortSignal, p: Prompter): Promise<string> {
     const rawPattern = argString(args, 'pattern');
     if (!rawPattern) throw new Error('pattern is required');
     const ignoreCase = argBool(args, 'ignore_case');
@@ -108,6 +114,8 @@ export class GrepTool implements Tool {
     const glob = argString(args, 'glob') || '**/*';
     const limit = Math.max(1, Math.floor(argNumber(args, 'limit') ?? 200));
 
+    await gateSearchInputs(p, base, glob, signal);
+
     const files = await globFiles(base, glob, 10_000, signal);
 
     const out: string[] = [];
@@ -120,6 +128,7 @@ export class GrepTool implements Tool {
         continue;
       }
       if (info.isDirectory() || info.size > GREP_FILE_BYTE_CAP) continue;
+      await gateSensitivePath(p, file, 'search', signal);
       const matches = await grepFile(file, re, limit - out.length, signal);
       out.push(...matches);
       if (out.length >= limit) break;
@@ -143,12 +152,10 @@ async function globFiles(
   // Single-file case: match the base name against
   // the pattern; if it matches, return just that file.
   if (!info.isDirectory()) {
-    const baseName = absBase.split(/[/\\]/).pop() ?? '';
-    const matched = await fg(pattern, { cwd: '/', dot: true });
-    return matched.some((m) => m.endsWith(baseName)) ||
-      (await fg(pattern, { cwd: absBase.replace(/[^/\\]+$/, ''), dot: true })).includes(baseName)
-      ? [absBase]
-      : [];
+    const dir = dirname(absBase);
+    const baseName = basename(absBase);
+    const matches = await fg(pattern, { cwd: dir, dot: true, onlyFiles: true });
+    return matches.some((m) => m === baseName || m.endsWith(`/${baseName}`)) ? [absBase] : [];
   }
 
   const results = await fg(pattern, {
@@ -164,6 +171,24 @@ async function globFiles(
     .slice(0, limit)
     .map((rel) => resolve(absBase, rel))
     .sort();
+}
+
+async function gateSearchInputs(
+  p: Prompter,
+  base: string,
+  pattern: string,
+  signal: AbortSignal,
+): Promise<void> {
+  await gateSensitivePath(p, resolve(base), 'search', signal);
+  const prefix = absoluteLiteralPrefix(pattern);
+  if (prefix) await gateSensitivePath(p, prefix, 'search', signal);
+}
+
+function absoluteLiteralPrefix(pattern: string): string {
+  if (!isAbsolute(pattern)) return '';
+  const idx = pattern.search(/[*?[\]{}()!]/);
+  const prefix = idx >= 0 ? pattern.slice(0, idx) : pattern;
+  return prefix ? resolve(prefix) : '';
 }
 
 async function grepFile(

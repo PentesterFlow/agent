@@ -12,6 +12,8 @@ export function modelReliabilityWarning(backend: Backend, model: string): string
     (normalizedBackend === 'openai-compat' ||
       normalizedBackend === 'kimi' ||
       normalizedBackend === 'groq' ||
+      normalizedBackend === 'openrouter' ||
+      normalizedBackend === 'deepseek' ||
       normalizedBackend === 'gemini') &&
     size < 70
   ) {

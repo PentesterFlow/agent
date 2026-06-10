@@ -2,9 +2,10 @@
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AlwaysAllow } from '../permission/permission.js';
+import { AlwaysAllow, AlwaysDeny } from '../permission/permission.js';
 import { GlobTool, GrepTool } from './search.js';
 
 let tmp = '';
@@ -48,6 +49,12 @@ describe('GlobTool', () => {
       /required/,
     );
   });
+
+  it('prompts before globbing sensitive paths', async () => {
+    await expect(
+      new GlobTool().run({ pattern: '*', path: join(homedir(), '.ssh') }, signal, new AlwaysDeny()),
+    ).rejects.toThrow(/search of sensitive path denied/);
+  });
 });
 
 describe('GrepTool', () => {
@@ -83,5 +90,26 @@ describe('GrepTool', () => {
     await expect(
       new GrepTool().run({ pattern: '[unterminated', path: tmp }, signal, new AlwaysAllow()),
     ).rejects.toThrow(/invalid regex/);
+  });
+
+  it('prompts before grepping sensitive paths', async () => {
+    await expect(
+      new GrepTool().run(
+        { pattern: 'BEGIN', path: join(homedir(), '.ssh') },
+        signal,
+        new AlwaysDeny(),
+      ),
+    ).rejects.toThrow(/search of sensitive path denied/);
+  });
+
+  it('greps a single file without expanding the search from filesystem root', async () => {
+    const out = await new GrepTool().run(
+      { pattern: 'package main', path: join(tmp, 'main.go') },
+      signal,
+      new AlwaysAllow(),
+    );
+
+    expect(out).toContain('main.go');
+    expect(out).toContain('package main');
   });
 });

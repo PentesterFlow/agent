@@ -199,7 +199,7 @@ describe('state.reducer tool-call preview', () => {
     expect(last?.text).toContain('\n$ ');
   });
 
-  it('renders confirmed findings with a red semantic label', () => {
+  it('renders a confirmed finding as a severity-labeled finding card', () => {
     const out = reducer(seed(), {
       type: 'agent-event',
       event: {
@@ -210,14 +210,73 @@ describe('state.reducer tool-call preview', () => {
         argsJSON: JSON.stringify({
           severity: 'low',
           title: 'Information Disclosure - PHP Version in Response Headers',
+          method: 'GET',
+          url: 'https://x.test/',
+          parameter: 'debug',
+          impact: 'Leaks the PHP version.',
         }),
       },
     });
     const last = out.transcript.at(-1);
-    expect(last?.text).toBe(
-      'Confirmed Finding (low) Information Disclosure - PHP Version in Response Headers',
-    );
-    expect(last?.color).toBe('red');
+    expect(last?.kind).toBe('finding');
+    expect(last?.prefix).toBe('★ ');
+    expect(last?.color).toBe('cyan'); // low → cyan
+    expect(last?.text).toContain('LOW · Information Disclosure - PHP Version in Response Headers');
+    expect(last?.text).toContain('GET https://x.test/  (param: debug)');
+    expect(last?.text).toContain('impact: Leaks the PHP version.');
+  });
+
+  it('colors finding cards by severity', () => {
+    const cardColor = (severity: string): string | undefined => {
+      const out = reducer(seed(), {
+        type: 'agent-event',
+        event: {
+          type: 'tool-call',
+          id: 'c1',
+          name: 'confirm_finding',
+          args: {},
+          argsJSON: JSON.stringify({ severity, title: 'T', url: 'https://x.test/', impact: 'i' }),
+        },
+      });
+      return out.transcript.at(-1)?.color;
+    };
+    expect(cardColor('critical')).toBe('magenta');
+    expect(cardColor('high')).toBe('red');
+    expect(cardColor('medium')).toBe('yellow');
+    expect(cardColor('low')).toBe('cyan');
+    expect(cardColor('info')).toBe('gray');
+  });
+
+  it('falls back to a normal tool-call when finding args lack a title', () => {
+    const out = reducer(seed(), {
+      type: 'agent-event',
+      event: {
+        type: 'tool-call',
+        id: 'c1',
+        name: 'confirm_finding',
+        args: {},
+        argsJSON: '{not valid json',
+      },
+    });
+    expect(out.transcript.at(-1)?.kind).toBe('tool-call');
+  });
+
+  it('renders the confirm_finding result as a quiet saved-path note', () => {
+    const out = reducer(seed(), {
+      type: 'agent-event',
+      event: {
+        type: 'tool-result',
+        id: 'c1',
+        name: 'confirm_finding',
+        result: 'Finding "XSS" written to ./findings/xss.md',
+        err: '',
+        durationMs: 4,
+      },
+    });
+    const last = out.transcript.at(-1);
+    expect(last?.kind).toBe('tool-result');
+    // No generic "[ok] confirm_finding (4ms)" prefix — just the confirmation.
+    expect(last?.text).toBe('Finding "XSS" written to ./findings/xss.md');
   });
 
   it('renders ask_user calls as a compact human prompt summary', () => {
@@ -283,6 +342,22 @@ describe('state.reducer streaming / committed-live split', () => {
       kind: 'decision',
       text: 'decision planner: selected skill: recon',
     });
+  });
+
+  it('advances the phase off "planning" as soon as a streamed delta arrives', () => {
+    // Reproduces the "stuck on planning" report: while busy, a streaming
+    // response must flip the phase to "answering" so the status line stops
+    // claiming we're still thinking for the whole generation.
+    let s = reducer(seed(), { type: 'set-busy', busy: true });
+    expect(s.phase).toBe('planning');
+    s = reducer(s, ev({ type: 'assistant-delta', text: 'Here is my plan' }));
+    expect(s.phase).toBe('answering');
+    expect(s.transcript.at(-1)?.text).toBe('Here is my plan');
+  });
+
+  it('does not change phase on a delta when not busy', () => {
+    const s = reducer(seed(), ev({ type: 'assistant-delta', text: 'x' }));
+    expect(s.phase).toBe('idle');
   });
 
   it('keeps a streaming assistant entry flagged until done finalizes it', () => {

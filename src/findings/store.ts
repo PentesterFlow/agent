@@ -35,9 +35,21 @@ export class Store {
     if (!existsSync(this.dir)) {
       mkdirSync(this.dir, { recursive: true });
     }
-    const path = join(this.dir, `${finding.slug}.md`);
-    await writeFile(path, render(finding), { encoding: 'utf8', mode: 0o600 });
-    return path;
+    const content = render(finding);
+    // Atomic create-exclusive (O_EXCL via flag 'wx'): the write fails if the
+    // path already exists, so two same-slug saves racing between an existence
+    // check and the write can't both resolve to one path and clobber each other
+    // (M12). On collision, bump the suffix and retry.
+    for (let i = 1; ; i += 1) {
+      const path = join(this.dir, i === 1 ? `${finding.slug}.md` : `${finding.slug}-${i}.md`);
+      try {
+        await writeFile(path, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+        return path;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+        throw err;
+      }
+    }
   }
 }
 

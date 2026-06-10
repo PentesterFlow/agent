@@ -1,6 +1,6 @@
-// Permission-flag behavior: YOLO must not auto-approve `bypassYolo`
-// requests, and `noSessionCache` requests must not be whitelisted for the
-// session by an "allow session" decision.
+// Permission-flag behavior: YOLO auto-approves EVERY request (no carve-outs),
+// matching --dangerously-skip-permissions; non-YOLO defers to the real
+// prompter.
 
 import { describe, expect, it } from 'vitest';
 import type { Decision, Prompter, Request } from './permission.js';
@@ -24,16 +24,25 @@ describe('YoloPrompter', () => {
     expect(inner.seen).toHaveLength(0);
   });
 
-  it('defers bypassYolo requests to the real prompter even in YOLO', async () => {
+  it('auto-approves sensitive/SSRF gates too — YOLO has no carve-outs', async () => {
     const inner = new ScriptedPrompter('deny');
     const y = new YoloPrompter(inner, true);
+    // A gate request (sensitive file / private host) that previously deferred
+    // to the prompter is now auto-approved under YOLO.
     const decision = await y.ask({
       tool: 'file',
       summary: 's',
       detail: 'd',
-      bypassYolo: true,
+      noSessionCache: true,
     });
-    expect(decision).toBe('deny');
+    expect(decision).toBe('allow-once');
+    expect(inner.seen).toHaveLength(0);
+  });
+
+  it('defers to the real prompter when YOLO is off', async () => {
+    const inner = new ScriptedPrompter('deny');
+    const y = new YoloPrompter(inner, false);
+    expect(await y.ask({ tool: 'shell', summary: 's', detail: 'd' })).toBe('deny');
     expect(inner.seen).toHaveLength(1);
   });
 });

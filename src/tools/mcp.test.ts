@@ -27,4 +27,22 @@ describe('MCPTool', () => {
       'isError',
     );
   });
+
+  it('truncates large successful MCP results', async () => {
+    const session = {
+      serverName: 'browser',
+      callTool: async () => ({
+        isError: false,
+        content: [{ type: 'text', text: 'a'.repeat(200_000) }],
+      }),
+    } as unknown as MCPSession;
+    const tool = new MCPTool(session, 'mcp_browser_big', 'big', 'Big output', {
+      type: 'object',
+    });
+
+    const out = await tool.run({}, new AbortController().signal, new AlwaysAllow());
+
+    expect(out).toContain('truncated');
+    expect(out.length).toBeLessThan(140_000);
+  });
 });

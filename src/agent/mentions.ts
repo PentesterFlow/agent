@@ -3,15 +3,19 @@
 // paths inline (the model has to use file_read to get them after a
 // permission prompt).
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { decodeUtf8Capped } from '../tools/file.js';
 import { isSensitivePath } from '../tools/sensitive.js';
 
 const MENTION_RE = /(^|[\s("'`])@(\S+)/g;
 const INLINE_BYTE_CAP = 64 * 1024;
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'vendor', '.next', 'dist', 'build', '.cache']);
 const REBUILD_COOLDOWN_MS = 2000;
+const INDEX_FILE_CAP = 5000;
+const INDEX_DIR_CAP = 1000;
+const INDEX_DEPTH_CAP = 12;
 
 let indexCwd = '';
 let indexBuiltAt = 0;
@@ -32,16 +36,22 @@ export function expandFileMentions(input: string): string {
     if (!resolved || seen.has(resolved)) continue;
     seen.add(resolved);
 
-    if (isSensitivePath(resolved)) {
+    // Resolve symlinks before the sensitivity check and before reading. The
+    // lexical `resolved` only normalizes `..`; a cwd symlink (e.g.
+    // notes -> ~/.ssh/id_rsa) would otherwise slip past isSensitivePath and get
+    // inlined into the prompt with no gate (H5). Match file.ts: check + read the
+    // real path.
+    const real = realResolveSync(resolved);
+    if (isSensitivePath(resolved) || isSensitivePath(real)) {
       blocks.push(
-        `### @${raw}\n[Refusing to inline sensitive path ${resolved}. If you need this file in context, read it explicitly with the file_read tool (which will prompt for approval).]`,
+        `### @${raw}\n[Refusing to inline sensitive path ${real}. If you need this file in context, read it explicitly with the file_read tool (which will prompt for approval).]`,
       );
       continue;
     }
 
     let info: import('node:fs').Stats;
     try {
-      info = statSync(resolved);
+      info = statSync(real);
     } catch {
       blocks.push(`### @${raw}\n[File not found: ${raw}]`);
       continue;
@@ -52,7 +62,7 @@ export function expandFileMentions(input: string): string {
     }
     let buf: Buffer;
     try {
-      buf = readFileSync(resolved);
+      buf = readFileSync(real);
     } catch (err) {
       blocks.push(`### @${raw}\n[Could not read file: ${(err as Error).message}]`);
       continue;
@@ -60,10 +70,10 @@ export function expandFileMentions(input: string): string {
     let body = buf.toString('utf8');
     let truncated = '';
     if (buf.byteLength > INLINE_BYTE_CAP) {
-      body = buf.subarray(0, INLINE_BYTE_CAP).toString('utf8');
+      body = decodeUtf8Capped(buf, INLINE_BYTE_CAP);
       truncated = `\n[... truncated ${buf.byteLength - INLINE_BYTE_CAP} bytes ...]`;
     }
-    blocks.push(`### @${raw}\nPath: ${resolved}\n\n\`\`\`text\n${body}\n\`\`\`${truncated}`);
+    blocks.push(`### @${raw}\nPath: ${real}\n\n\`\`\`text\n${body}\n\`\`\`${truncated}`);
   }
   if (blocks.length === 0) return input;
   return `${input}\n\n# Referenced files\n\n${blocks.join('\n\n')}`;
@@ -90,6 +100,20 @@ function cleanMentionPath(raw: string): string {
     if (home) p = join(home, p.slice(2));
   }
   return p;
+}
+
+/** Symlink-resolve a path (parent-dir fallback for the leaf), mirroring
+ *  file.ts realResolve but synchronous. Falls back to the lexical path. */
+function realResolveSync(abs: string): string {
+  try {
+    return realpathSync(abs);
+  } catch {
+    try {
+      return resolve(realpathSync(dirname(abs)), basename(abs));
+    } catch {
+      return abs;
+    }
+  }
 }
 
 function resolveMention(raw: string): { resolved: string; note: string } {
@@ -129,11 +153,19 @@ function findByBaseName(name: string, limit: number): string[] {
 
 function buildIndex(cwd: string): Map<string, string[]> {
   const idx = new Map<string, string[]>();
-  walk(cwd, idx);
+  walk(cwd, idx, { files: 0, dirs: 0 }, 0);
   return idx;
 }
 
-function walk(dir: string, idx: Map<string, string[]>): void {
+function walk(
+  dir: string,
+  idx: Map<string, string[]>,
+  state: { files: number; dirs: number },
+  depth: number,
+): void {
+  if (state.files >= INDEX_FILE_CAP || state.dirs >= INDEX_DIR_CAP || depth > INDEX_DEPTH_CAP) {
+    return;
+  }
   let entries: import('node:fs').Dirent[];
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -141,15 +173,19 @@ function walk(dir: string, idx: Map<string, string[]>): void {
     return;
   }
   for (const e of entries) {
+    if (state.files >= INDEX_FILE_CAP || state.dirs >= INDEX_DIR_CAP) return;
     if (e.isDirectory()) {
       if (SKIP_DIRS.has(e.name)) continue;
-      walk(join(dir, e.name), idx);
+      state.dirs += 1;
+      walk(join(dir, e.name), idx, state, depth + 1);
       continue;
     }
+    if (!e.isFile()) continue;
     const full = join(dir, e.name);
     const arr = idx.get(e.name);
     if (arr) arr.push(full);
     else idx.set(e.name, [full]);
+    state.files += 1;
   }
 }
 

@@ -21,12 +21,28 @@ const patterns: RegExp[] = [
   /\b(gh[pousr]_)([A-Za-z0-9]{36,255})\b/g,
   // Stripe live / test keys.
   /\b(sk_(?:live|test)_)([A-Za-z0-9]{16,})\b/g,
+  // OpenAI-style project and legacy keys.
+  /\b(sk-)([A-Za-z0-9_-]{20,})\b/g,
+  // Google API keys.
+  /\b(AIza)([0-9A-Za-z_-]{35,})\b/g,
   // Slack tokens.
   /\b(xox[abprs]-)([A-Za-z0-9-]{10,})\b/g,
-  // JWTs (header.body.sig with realistic body+sig length).
-  /\b(eyJ[A-Za-z0-9_-]{8,}\.)([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g,
+  // Password in URL userinfo: scheme://user:pass@host (any scheme — http(s),
+  // postgres, mysql, redis, git remotes, etc.). The password body is captured
+  // up to (but not including) the `@`, which a lookahead keeps in the string so
+  // the rest of the URL survives. A port like host:8080/path won't match
+  // because it isn't followed by `@` (H9).
+  /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:)([^@\s/]+)(?=@)/gi,
+  // JWTs: header.body, with an optional signature. A 2-segment / alg:none token
+  // (or a header+payload prefix logged before the signature) still carries the
+  // base64 claims, so we no longer require the third segment (H10).
+  /\b(eyJ[A-Za-z0-9_-]{8,}\.)([A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?)\b/g,
   // Generic api_key / secret / password / token = value assignment.
   /((?:api[_-]?key|secret|password|passwd|token)\s*[:=]\s*["']?)([A-Za-z0-9._\-+/=]{16,})/gi,
+  // Cookie headers.
+  /((?:set-)?cookie:\s*)([^\r\n]+)/gi,
+  // Common API key headers.
+  /((?:x-api-key|api-key|apikey):\s*)([^\r\n]+)/gi,
 ];
 
 const privateKeyBlock =

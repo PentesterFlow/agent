@@ -14,6 +14,7 @@ import type { Tool } from './types.js';
 
 const HANDSHAKE_TIMEOUT_MS = 15_000;
 const CLOSE_DEADLINE_MS = 3_000;
+const MCP_RESULT_CHAR_CAP = 128 * 1024;
 
 export class MCPSession {
   readonly serverName: string;
@@ -167,12 +168,46 @@ export class MCPTool implements Tool {
 
   async run(args: Record<string, unknown>, signal: AbortSignal, _p: Prompter): Promise<string> {
     const result = await this.session.callTool(this.remoteName, args, signal);
-    const body = JSON.stringify(result.content, null, 2);
     if (result.isError) {
       throw new Error(formatMCPError(this.toolName, this.remoteName, result.content));
     }
-    return body;
+    // Bound the content BEFORE the pretty-print so a hostile/compromised server's
+    // oversized text block isn't first expanded into an even larger indented
+    // string (M10). The MCP SDK still buffers the raw transport message itself —
+    // a true byte cap would need transport-level support it doesn't expose — but
+    // this stops the secondary doubling and caps the block count.
+    const bounded = boundContent(result.content, MCP_RESULT_CHAR_CAP);
+    return truncateString(JSON.stringify(bounded, null, 2), MCP_RESULT_CHAR_CAP);
   }
+}
+
+const MCP_MAX_CONTENT_BLOCKS = 200;
+
+/** Recursively cap string fields and array lengths in MCP content so the
+ *  downstream JSON.stringify can't allocate an unbounded string. */
+function boundContent(content: unknown, cap: number): unknown {
+  if (typeof content === 'string') return content.length > cap ? content.slice(0, cap) : content;
+  if (Array.isArray(content)) {
+    const head = content.slice(0, MCP_MAX_CONTENT_BLOCKS).map((b) => boundContent(b, cap));
+    if (content.length > MCP_MAX_CONTENT_BLOCKS) {
+      head.push({
+        type: 'text',
+        text: `[... ${content.length - MCP_MAX_CONTENT_BLOCKS} more content blocks truncated ...]`,
+      });
+    }
+    return head;
+  }
+  if (content && typeof content === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(content)) out[k] = boundContent(v, cap);
+    return out;
+  }
+  return content;
+}
+
+function truncateString(s: string, cap: number): string {
+  if (s.length <= cap) return s;
+  return `${s.slice(0, cap)}\n[... truncated ${s.length - cap} chars ...]`;
 }
 
 function formatMCPError(toolName: string, remoteName: string, content: unknown): string {

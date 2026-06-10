@@ -5,11 +5,22 @@
 
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import type { Prompter } from '../permission/permission.js';
 import { isSensitivePath } from './sensitive.js';
 import { type Tool, argBool, argString } from './types.js';
 
 const READ_BYTE_CAP = 200 * 1024;
+
+/**
+ * Decode up to `cap` bytes of UTF-8 without emitting a trailing U+FFFD when the
+ * cap falls mid-codepoint. StringDecoder.write returns only the complete
+ * characters and holds back an incomplete trailing sequence, which we drop by
+ * never calling end(). Used by the read/mention byte caps.
+ */
+export function decodeUtf8Capped(buf: Buffer, cap: number): string {
+  return new StringDecoder('utf8').write(buf.subarray(0, cap));
+}
 
 /**
  * Resolve a path to its real on-disk location so a symlink (e.g.
@@ -37,25 +48,30 @@ async function realResolve(abs: string): Promise<string> {
  * checking the lexical path keeps listed entries like /etc/shadow matching
  * even where realpath would canonicalize them (e.g. /private/etc on macOS),
  * while checking the real path defeats symlink smuggling. Flagged
- * bypassYolo + noSessionCache so the prompt fires even in YOLO and is never
- * silently re-granted for the session. `verb` is "read"/"write to"/"edit".
- * Throws on deny.
+ * noSessionCache so the prompt fires on every access and is never silently
+ * re-granted for the session. (Under YOLO, like every gate, it's
+ * auto-approved.) `verb` is "read"/"write to"/"edit".
+ *
+ * Returns the symlink-resolved real path; callers MUST perform their actual
+ * read/write on this returned path rather than re-resolving the lexical one.
+ * Reading/writing the already-resolved path (which contains no symlinks at the
+ * leaf) closes the TOCTOU window where a symlink swapped between the gate check
+ * and the I/O could smuggle a credential file past the prompt. Throws on deny.
  */
-async function gateSensitive(
+export async function gateSensitivePath(
   p: Prompter,
   abs: string,
   verb: string,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<string> {
   const real = await realResolve(abs);
-  if (!isSensitivePath(abs) && !isSensitivePath(real)) return;
+  if (!isSensitivePath(abs) && !isSensitivePath(real)) return real;
   const shown = real !== abs ? `${abs}\nresolves to: ${real}` : abs;
   const decision = await p.ask(
     {
       tool: 'file',
       summary: `${verb} sensitive file: ${real}`,
       detail: `path: ${shown}\n\nThis path is on the sensitive-path list (private keys, cloud credentials, shell history, config dirs, etc.). Approve only if you intend to ${verb} it.`,
-      bypassYolo: true,
       noSessionCache: true,
     },
     signal,
@@ -63,6 +79,7 @@ async function gateSensitive(
   if (decision === 'deny') {
     throw new Error(`${verb} of sensitive path denied: ${real}`);
   }
+  return real;
 }
 
 export class FileReadTool implements Tool {
@@ -95,11 +112,12 @@ export class FileReadTool implements Tool {
     if (!path) throw new Error('path is required');
     const abs = resolve(path);
 
-    await gateSensitive(p, abs, 'read', signal);
+    // Read from the gate-resolved real path, not the lexical one (M1 TOCTOU).
+    const real = await gateSensitivePath(p, abs, 'read', signal);
 
-    const buf = await readFile(abs);
+    const buf = await readFile(real);
     if (buf.byteLength > READ_BYTE_CAP) {
-      const head = buf.subarray(0, READ_BYTE_CAP).toString('utf8');
+      const head = decodeUtf8Capped(buf, READ_BYTE_CAP);
       return `${head}\n[... truncated ${buf.byteLength - READ_BYTE_CAP} bytes ...]`;
     }
     return buf.toString('utf8');
@@ -130,6 +148,11 @@ export class FileWriteTool implements Tool {
   requiresPermission(): boolean {
     return true;
   }
+  // Scope an "allow session" approval to the destination path so it can't
+  // silently authorize writes to other files for the rest of the session.
+  permissionHints(args: Record<string, unknown>): { cacheKey: string } {
+    return { cacheKey: resolve(argString(args, 'path')) };
+  }
   summarize(args: Record<string, unknown>): { summary: string; detail: string } {
     const path = argString(args, 'path');
     const content = argString(args, 'content');
@@ -145,10 +168,10 @@ export class FileWriteTool implements Tool {
     const content = argString(args, 'content');
     if (!path) throw new Error('path is required');
     const abs = resolve(path);
-    await gateSensitive(p, abs, 'write to', signal);
-    await mkdir(dirname(abs), { recursive: true, mode: 0o755 });
-    await writeFile(abs, content, { encoding: 'utf8', mode: 0o644 });
-    return `wrote ${Buffer.byteLength(content, 'utf8')} bytes to ${abs}`;
+    const real = await gateSensitivePath(p, abs, 'write to', signal);
+    await mkdir(dirname(real), { recursive: true, mode: 0o755 });
+    await writeFile(real, content, { encoding: 'utf8', mode: 0o644 });
+    return `wrote ${Buffer.byteLength(content, 'utf8')} bytes to ${real}`;
   }
 }
 
@@ -178,6 +201,10 @@ export class FileEditTool implements Tool {
   requiresPermission(): boolean {
     return true;
   }
+  // Scope an "allow session" approval to the edited path (see FileWriteTool).
+  permissionHints(args: Record<string, unknown>): { cacheKey: string } {
+    return { cacheKey: resolve(argString(args, 'path')) };
+  }
   summarize(args: Record<string, unknown>): { summary: string; detail: string } {
     const path = argString(args, 'path');
     return {
@@ -194,18 +221,22 @@ export class FileEditTool implements Tool {
     if (!path || !oldS) throw new Error('path and old_string are required');
 
     const abs = resolve(path);
-    await gateSensitive(p, abs, 'edit', signal);
-    const content = await readFile(abs, 'utf8');
+    const real = await gateSensitivePath(p, abs, 'edit', signal);
+    const content = await readFile(real, 'utf8');
     const count = countOccurrences(content, oldS);
-    if (count === 0) throw new Error(`old_string not found in ${abs}`);
+    if (count === 0) throw new Error(`old_string not found in ${real}`);
     if (count > 1 && !replaceAll) {
       throw new Error(
-        `old_string appears ${count} times in ${abs}; pass replace_all=true or use a longer unique snippet`,
+        `old_string appears ${count} times in ${real}; pass replace_all=true or use a longer unique snippet`,
       );
     }
-    const updated = replaceAll ? content.split(oldS).join(newS) : content.replace(oldS, newS);
-    await writeFile(abs, updated, { encoding: 'utf8', mode: 0o644 });
-    return `edited ${abs} (${count} replacement(s))`;
+    // Always split/join (literal replacement). String.prototype.replace would
+    // interpret `$&`/`$1`/`$$`/`` $` `` in new_string, silently corrupting PoCs
+    // or scripts that contain those literally (L3). With count===1 in the
+    // single branch, split/join replaces exactly that one occurrence.
+    const updated = content.split(oldS).join(newS);
+    await writeFile(real, updated, { encoding: 'utf8', mode: 0o644 });
+    return `edited ${real} (${count} replacement(s))`;
   }
 }
 

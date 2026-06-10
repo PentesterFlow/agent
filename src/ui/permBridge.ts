@@ -20,8 +20,23 @@ export class BridgedPrompter implements Prompter {
     this.publish = publish;
   }
 
+  // Session-cache identity. Keying on the tool name alone would let one
+  // "allow session" on a benign invocation (e.g. `id`) whitelist every later
+  // call of that tool — including arbitrary commands / hosts / paths. Keying
+  // on (tool, cacheKey) scopes the approval to the specific command, origin,
+  // or path the user actually saw. Tools without a cacheKey keep whole-tool
+  // caching (fine for low-consequence tools). Tool names never contain
+  // spaces, so "<tool> <cacheKey>" can't collide across tools.
+  private keyFor(req: Request): string {
+    return req.cacheKey ? `${req.tool} ${req.cacheKey}` : req.tool;
+  }
+
   async ask(req: Request, signal?: AbortSignal): Promise<Decision> {
-    if (this.sessionAllowed.has(req.tool)) return 'allow-once';
+    // Consult noSessionCache BEFORE the cache read: a request that opts out of
+    // session caching must always re-prompt, never be silently satisfied from
+    // the cache (L13 — defuses a latent bypass even though key spaces don't
+    // currently collide).
+    if (!req.noSessionCache && this.sessionAllowed.has(this.keyFor(req))) return 'allow-once';
     return new Promise<Decision>((resolve, reject) => {
       if (signal?.aborted) {
         reject(new Error('aborted'));
@@ -39,7 +54,8 @@ export class BridgedPrompter implements Prompter {
           signal?.removeEventListener('abort', onAbort);
           // Sensitive requests can opt out of session caching: honor this
           // one approval but re-prompt next time.
-          if (d === 'allow-session' && !req.noSessionCache) this.sessionAllowed.add(req.tool);
+          if (d === 'allow-session' && !req.noSessionCache)
+            this.sessionAllowed.add(this.keyFor(req));
           this.publish(null);
           resolve(d);
         },

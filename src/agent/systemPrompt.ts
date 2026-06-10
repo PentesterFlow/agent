@@ -5,6 +5,7 @@
 // Tests in systemPrompt.test.ts pin the scope guard and playbook markers
 // so a future trim can't silently widen behavior.
 
+import type { SessionMemory } from '../session/store.js';
 import type { Registry } from '../skills/registry.js';
 import type { Target } from '../target/target.js';
 
@@ -297,6 +298,18 @@ export interface BuildOptions {
   toolingProfile?: ToolingProfile;
   /** 'compact' keeps hosted small-TPM providers under request limits. */
   promptProfile?: PromptProfile;
+  /**
+   * Persistent session memory (built on each compaction). Rendered into the
+   * prompt so accumulated objectives/findings/TODOs survive compaction and
+   * restart — otherwise only the latest compaction summary reaches the model.
+   */
+  memory?: SessionMemory | null;
+  /**
+   * Operator-authored engagement notes (scope, rules, credential placeholders,
+   * standing objectives). Loaded from .pentesterflow/engagement.md and always
+   * injected — transcript-independent, so it survives compaction unconditionally.
+   */
+  engagement?: string;
 }
 
 export function buildSystemPrompt(opts: BuildOptions): string {
@@ -337,6 +350,9 @@ export function buildSystemPrompt(opts: BuildOptions): string {
     sb += '- Do not probe hosts outside this target without the user explicitly asking.\n';
   }
 
+  sb += renderEngagement(opts.engagement);
+  sb += renderMemory(opts.memory);
+
   // Advertise only the skills the user has left enabled AND which allow
   // model-side invocation. Disabled ones still live in the registry (for
   // /skills listing) but the model shouldn't see or try to load them —
@@ -352,6 +368,48 @@ export function buildSystemPrompt(opts: BuildOptions): string {
   sb += '\nAvailable skills:\n';
   for (const s of list) {
     sb += `- ${s.name} — ${s.description}\n`;
+  }
+  return sb;
+}
+
+/**
+ * Render operator-authored engagement notes. Unlike the auto-generated memory
+ * below, this content is human-written and authoritative — it is never
+ * summarized away because it lives in a file, not the transcript.
+ */
+function renderEngagement(engagement: string | undefined): string {
+  const text = engagement?.trim();
+  if (!text) return '';
+  return `\n# Engagement notes (operator-authored — authoritative, follow over inferred context)\n${text}\n`;
+}
+
+/**
+ * Render persistent session memory as a pinned prompt stanza. This is what
+ * lets a long session survive context compaction and restart: the cumulative
+ * checkpoint (not just the latest summary) rides in the system prompt on every
+ * request. Each list is capped to the most recent items so the block can't grow
+ * without bound across many compactions.
+ */
+function renderMemory(memory: SessionMemory | null | undefined): string {
+  if (!memory) return '';
+  const sections: Array<[string, string[]]> = [
+    ['Objectives', memory.objectives],
+    ['Plan', memory.plan],
+    ['Completed', memory.completed],
+    ['Findings and evidence', memory.findings],
+    ['Tested surface (already covered — do not repeat)', memory.tested],
+    ['Open TODOs / next actions', memory.todos],
+    ['Key files and commands', [...memory.files, ...memory.commands]],
+  ];
+  if (sections.every(([, items]) => items.length === 0)) return '';
+
+  const c = memory.compactions;
+  let sb = `\n# Carried session state (survived ${c} compaction${c === 1 ? '' : 's'} — do not repeat completed work)\n`;
+  sb += '_State below reflects earlier turns — verify it still holds before relying on it._\n';
+  for (const [title, items] of sections) {
+    if (items.length === 0) continue;
+    sb += `\n## ${title}\n`;
+    for (const item of items.slice(-8)) sb += `- ${item}\n`;
   }
   return sb;
 }

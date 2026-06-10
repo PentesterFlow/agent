@@ -1,11 +1,15 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { appendFile, chmod } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { apply as redact } from '../redact/index.js';
 
 export type IntelligenceScope = 'project' | 'personal' | 'builtin';
+
+// Upper bound on persisted scenarios per scope file, so the JSONL knowledge
+// base can't grow without limit across many sessions (M13).
+const MAX_SCENARIOS_PER_FILE = 5000;
 
 export interface IntelligenceScenario {
   id: string;
@@ -120,12 +124,45 @@ export class IntelligenceStore {
       createdAt: input.createdAt ?? new Date().toISOString(),
       scope,
     });
-    if (this.hasDuplicate(scenario)) return null;
-    const path = scope === 'personal' ? this.personalPath : this.projectPath;
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    await appendFile(path, `${JSON.stringify(scenario)}\n`, { mode: 0o600 });
-    await chmod(path, 0o600).catch(() => undefined);
-    return scenario;
+    // Serialize the check-then-append so two concurrent learn calls can't both
+    // pass the duplicate check and write the same scenario twice (M13). The
+    // critical section also caps file growth.
+    return this.serializeWrite(async () => {
+      if (this.hasDuplicate(scenario)) return null;
+      const path = scope === 'personal' ? this.personalPath : this.projectPath;
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      await appendFile(path, `${JSON.stringify(scenario)}\n`, { mode: 0o600 });
+      await chmod(path, 0o600).catch(() => undefined);
+      this.pruneIfTooLong(path, scope);
+      return scenario;
+    });
+  }
+
+  // In-process append lock: chains writes so each runs its duplicate check and
+  // append atomically with respect to the others. Failures don't break the
+  // chain. Both scopes share one chain — appends are infrequent (background
+  // learning), so the serialization cost is negligible.
+  private writeChain: Promise<unknown> = Promise.resolve();
+  private serializeWrite<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.writeChain.then(fn, fn);
+    this.writeChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  // Cap the JSONL so a long-lived knowledge base doesn't grow without bound
+  // (M13). Keeps the most recent scenarios; older ones age out.
+  private pruneIfTooLong(path: string, scope: IntelligenceScope): void {
+    try {
+      const scenarios = readJSONL(path, scope);
+      if (scenarios.length <= MAX_SCENARIOS_PER_FILE) return;
+      const kept = scenarios.slice(scenarios.length - MAX_SCENARIOS_PER_FILE);
+      writeFileSync(path, `${kept.map((s) => JSON.stringify(s)).join('\n')}\n`, { mode: 0o600 });
+    } catch {
+      // Best effort — a prune failure must not break learning.
+    }
   }
 
   async learnFromText(text: string, sourceSessionId?: string): Promise<IntelligenceScenario[]> {

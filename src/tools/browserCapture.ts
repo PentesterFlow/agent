@@ -224,6 +224,9 @@ export class BrowserCaptureClearTool extends BaseCaptureTool {
         'Wipes all captured requests, endpoints, and snapshots from memory. Forwarding continues — new captures will repopulate the store.',
     };
   }
+  permissionHints(): { noSessionCache: boolean } {
+    return { noSessionCache: true };
+  }
   async run(): Promise<string> {
     this.store.clear();
     return 'cleared.';

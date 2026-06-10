@@ -3,6 +3,7 @@
 // parses the top results.
 
 import type { Prompter } from '../permission/permission.js';
+import { gatePrivateRequest, parseHTTPURL } from './privateHost.js';
 import { type Tool, argString } from './types.js';
 
 const FETCH_TIMEOUT_MS = 30 * 1000;
@@ -46,9 +47,11 @@ export class WebFetchTool implements Tool {
     return false;
   }
 
-  async run(args: Record<string, unknown>, signal: AbortSignal, _p: Prompter): Promise<string> {
+  async run(args: Record<string, unknown>, signal: AbortSignal, p: Prompter): Promise<string> {
     const url = argString(args, 'url');
     if (!url) throw new Error('url is required');
+    const parsed = parseHTTPURL(url);
+    await gatePrivateRequest(p, parsed, signal, 'web_fetch');
 
     const inner = AbortSignal.timeout(FETCH_TIMEOUT_MS);
     const combined = anySignal(signal, inner);
@@ -57,6 +60,7 @@ export class WebFetchTool implements Tool {
     try {
       resp = await fetch(url, {
         method: 'GET',
+        redirect: 'manual',
         headers: {
           Accept: 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8',
           'User-Agent': 'Mozilla/5.0 pentesterflow/0.1 (+research)',

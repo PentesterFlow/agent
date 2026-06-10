@@ -6,10 +6,15 @@
 import { homedir } from 'node:os';
 import { resolve, sep } from 'node:path';
 
+// macOS canonicalizes /etc -> /private/etc, so denylist both spellings: a
+// file_read of /private/etc/sudoers (or a realpath that lands there) must be
+// caught even though the lexical /etc/... form is what users usually type.
 const SYSTEM_PATHS = [
   '/etc/shadow',
   '/etc/sudoers',
   '/etc/master.passwd',
+  '/private/etc/shadow',
+  '/private/etc/sudoers',
   '/private/etc/master.passwd',
 ];
 
@@ -43,15 +48,26 @@ export function isSensitivePath(abs: string): boolean {
   const cleaned = resolve(abs);
 
   for (const p of SYSTEM_PATHS) {
-    if (cleaned === p || cleaned.startsWith(p + sep)) return true;
+    if (matchesPath(cleaned, p)) return true;
   }
 
   const home = homedir();
   if (!home) return false;
 
   for (const rel of HOME_RELATIVE) {
-    const candidate = resolve(home, rel);
-    if (cleaned === candidate || cleaned.startsWith(candidate + sep)) return true;
+    if (matchesPath(cleaned, resolve(home, rel))) return true;
   }
   return false;
+}
+
+// Exact-or-directory-prefix match. Case-insensitive so the gate still fires on
+// case-insensitive filesystems (default APFS/HFS+ on macOS, NTFS on Windows),
+// where `/ETC/SUDOERS` and `~/.SSH/id_rsa` open the same file as the lowercase
+// form. On case-sensitive Linux this can only over-prompt for an unrelated file
+// that differs solely by case — harmless, since the gate is a prompt the
+// operator can allow, never a hard block.
+function matchesPath(candidate: string, target: string): boolean {
+  const c = candidate.toLowerCase();
+  const t = target.toLowerCase();
+  return c === t || c.startsWith(t + sep);
 }

@@ -24,13 +24,15 @@
 
 import { Chalk } from 'chalk';
 import { highlight, supportsLanguage } from 'cli-highlight';
+import { chalkLevel } from './colorLevel.js';
 
 // Force color level 3 (truecolor) inside this module. Default chalk
 // suppresses ANSI when stdout isn't a TTY (test runs, piped output),
 // but the transcript is always rendered by Ink — Ink requires a TTY
 // itself — so always emitting ANSI is correct and lets tests assert
-// directly on the escape sequences without test-env overrides.
-const chalk = new Chalk({ level: 3 });
+// directly on the escape sequences without test-env overrides. Drops to
+// level 0 when NO_COLOR is set (see colorLevel.ts).
+const chalk = new Chalk({ level: chalkLevel() });
 
 /**
  * Render a markdown string to an ANSI-styled string for direct insertion
@@ -45,7 +47,8 @@ export function renderMarkdown(s: string): string {
   let fenceLang = '';
   let fenceBuf: string[] = [];
 
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = lines[i] ?? '';
     // CommonMark allows 0-3 spaces of indent before a fence marker. We
     // honor that — many models emit ` ```python` (one space) when the
     // block sits after a colon or inside a list, and a strict
@@ -71,6 +74,19 @@ export function renderMarkdown(s: string): string {
     }
     if (inFence) {
       fenceBuf.push(raw);
+      continue;
+    }
+    // GitHub-style pipe table: a header row followed by a |---|---| separator.
+    // Consume the whole block and render it box-aligned.
+    if (isTableRow(raw) && isTableSeparator(lines[i + 1] ?? '')) {
+      const block: string[] = [raw];
+      let j = i + 2;
+      while (j < lines.length && isTableRow(lines[j] ?? '')) {
+        block.push(lines[j] ?? '');
+        j += 1;
+      }
+      out.push(renderTable(block));
+      i = j - 1;
       continue;
     }
     out.push(renderLine(raw));
@@ -183,14 +199,94 @@ function renderLine(line: string): string {
   return renderInline(line);
 }
 
-/** Inline span styling. Order matters — code is processed first so
- *  backtick contents don't get re-interpreted as bold/italic. */
+/** Inline span styling. Order matters — links are processed first so their
+ *  URLs aren't mangled by the emphasis passes, then code (so backtick
+ *  contents aren't re-interpreted as bold/italic), then bold/italic. */
 function renderInline(s: string): string {
   if (!s) return s;
   return s
+    .replace(LINK_RE, (_m, label: string, url: string) =>
+      label === url
+        ? chalk.blue.underline(url)
+        : `${chalk.blue.underline(label)} ${chalk.dim(`(${url})`)}`,
+    )
     .replace(/`([^`]+)`/g, (_m, body: string) => chalk.cyan(body))
     .replace(/\*\*([^*\n]+)\*\*/g, (_m, body: string) => chalk.bold(body))
     .replace(/__([^_\n]+)__/g, (_m, body: string) => chalk.bold(body))
     .replace(/(?<![\w*])\*([^*\n]+)\*(?!\w)/g, (_m, body: string) => chalk.italic(body))
     .replace(/(?<![\w_])_([^_\n]+)_(?!\w)/g, (_m, body: string) => chalk.italic(body));
+}
+
+// [label](url) — url stops at whitespace or the closing paren so trailing
+// prose isn't swallowed. Bare/auto links are left untouched.
+const LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+
+// ---------- tables ----------
+
+// Match SGR color escapes (ESC [ … m). Built via fromCharCode so the source
+// holds no literal control character (which the linter forbids).
+const ANSI_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
+
+/** Visible width of a string after ANSI escapes are stripped. */
+function visibleWidth(s: string): number {
+  return s.replace(ANSI_RE, '').length;
+}
+
+/** A line that participates in a pipe table (contains a `|`). */
+function isTableRow(line: string): boolean {
+  return line.includes('|') && line.trim().length > 0;
+}
+
+/** The `|---|:--:|` divider under a table header. */
+function isTableSeparator(line: string): boolean {
+  const t = line.trim();
+  if (!t.includes('-') || !t.includes('|')) return false;
+  return /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$/.test(t);
+}
+
+/** Split a pipe row into trimmed cells, dropping the optional leading/
+ *  trailing pipe. A `\|` escapes a literal pipe inside a cell. */
+function splitTableRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+  return s.split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, '|').trim());
+}
+
+/**
+ * Render a markdown pipe table as an aligned, box-drawn grid. `block[0]` is
+ * the header, `block[1]` was the separator (already consumed by the caller —
+ * not passed in here), `block[1..]` are body rows. Columns are sized to the
+ * widest rendered cell; a `─┼─` rule separates the header from the body.
+ */
+function renderTable(block: string[]): string {
+  const header = splitTableRow(block[0] ?? '');
+  const bodyRows = block.slice(1).map(splitTableRow);
+  const cols = Math.max(header.length, ...bodyRows.map((r) => r.length), 1);
+
+  const cell = (cells: string[], c: number): string => renderInline(cells[c] ?? '');
+  const widths: number[] = [];
+  for (let c = 0; c < cols; c += 1) {
+    let w = visibleWidth(cell(header, c));
+    for (const row of bodyRows) w = Math.max(w, visibleWidth(cell(row, c)));
+    widths[c] = w;
+  }
+
+  const pad = (text: string, width: number): string =>
+    text + ' '.repeat(Math.max(0, width - visibleWidth(text)));
+
+  const renderRow = (cells: string[], bold: boolean): string => {
+    const parts: string[] = [];
+    for (let c = 0; c < cols; c += 1) {
+      const styled = bold ? chalk.bold(cell(cells, c)) : cell(cells, c);
+      parts.push(pad(styled, widths[c] ?? 0));
+    }
+    return parts.join(chalk.dim(' │ '));
+  };
+
+  // Mirror the ` │ ` column join with `─┼─` so the ┼ sits under each │.
+  const rule = widths.map((w) => '─'.repeat(w ?? 0)).join('─┼─');
+  const out = [renderRow(header, true), chalk.dim(rule)];
+  for (const row of bodyRows) out.push(renderRow(row, false));
+  return out.join('\n');
 }

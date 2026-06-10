@@ -16,6 +16,7 @@
     $env:PENTESTERFLOW_INSTALL_DIR = 'C:\path'  # install location
     $env:PENTESTERFLOW_SKILLS_DIR  = 'C:\path'  # shipped skills location
     $env:PENTESTERFLOW_SKIP_SKILLS = '1'        # install binary only
+    $env:PENTESTERFLOW_SKIP_CHECKSUM = '1'      # install without SHA-256 verification (unsafe)
     $env:PENTESTERFLOW_REPO        = 'owner/repo'
 #>
 
@@ -67,30 +68,30 @@ try {
     throw "downloaded asset is empty: $base/$asset"
   }
 
-  # --- verify checksum ----------------------------------------------------
-  $checksumVerified = $false
-  try {
-    $sums = (Invoke-WebRequest -Uri "$base/SHA256SUMS" -UseBasicParsing -ErrorAction Stop).Content
-  } catch {
-    Write-Warning "SHA256SUMS unavailable; skipping checksum verification: $($_.Exception.Message)"
-    $sums = $null
-  }
-
-  if ($sums) {
+  # --- verify checksum (required; fail-closed) ----------------------------
+  # A self-updating binary must not install an unverified download. Any
+  # failure to verify is fatal. Set $env:PENTESTERFLOW_SKIP_CHECKSUM='1' to
+  # override (e.g. a mirror you trust by other means).
+  if ($env:PENTESTERFLOW_SKIP_CHECKSUM -eq '1') {
+    Write-Warning 'PENTESTERFLOW_SKIP_CHECKSUM=1 set - installing WITHOUT checksum verification'
+  } else {
+    try {
+      $sums = (Invoke-WebRequest -Uri "$base/SHA256SUMS" -UseBasicParsing -ErrorAction Stop).Content
+    } catch {
+      throw "could not download SHA256SUMS from $base - refusing to install an unverified binary (set `$env:PENTESTERFLOW_SKIP_CHECKSUM='1' to override): $($_.Exception.Message)"
+    }
     $line = $sums -split "`n" |
       Where-Object { $_ -match "\s$([regex]::Escape($asset))\s*$" } |
       Select-Object -First 1
-    if ($line) {
-      $want = ($line -replace '\s.*$', '').Trim().ToLower()
-      $got  = (Get-FileHash -Algorithm SHA256 -Path $download).Hash.ToLower()
-      if ($got -ne $want) {
-        throw "checksum mismatch for $asset (expected $want, got $got)"
-      }
-      $checksumVerified = $true
-      Write-Host 'checksum ok'
-    } else {
-      Write-Warning "SHA256SUMS does not contain $asset; skipping checksum verification"
+    if (-not $line) {
+      throw "SHA256SUMS does not list $asset - refusing to install an unverified binary"
     }
+    $want = ($line -replace '\s.*$', '').Trim().ToLower()
+    $got  = (Get-FileHash -Algorithm SHA256 -Path $download).Hash.ToLower()
+    if ($got -ne $want) {
+      throw "checksum mismatch for $asset (expected $want, got $got)"
+    }
+    Write-Host 'checksum ok'
   }
 
   $dest = Join-Path $dir "$Bin.exe"
@@ -157,9 +158,6 @@ try {
     Write-Host "added $dir to your user PATH (open a new terminal for it to take effect)"
   }
 
-  if (-not $checksumVerified) {
-    Write-Warning 'installed without checksum verification'
-  }
   & $dest --version
 } finally {
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp

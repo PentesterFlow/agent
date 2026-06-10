@@ -11,9 +11,13 @@
 // in the transcript appear as plain prose instead of syntax-coloured.
 //
 // We honor a user override: if FORCE_COLOR is already set in the env
-// (intentionally or by a no-color tool), we leave it alone.
+// (intentionally or by a no-color tool), we leave it alone. We also honor
+// the NO_COLOR standard (https://no-color.org): when NO_COLOR is set, we do
+// NOT force color on — the UI's chalk instances drop to level 0 to match
+// (see ui/colorLevel.ts).
 
-if (!process.env.FORCE_COLOR) {
+const noColor = typeof process.env.NO_COLOR === 'string' && process.env.NO_COLOR !== '';
+if (!process.env.FORCE_COLOR && !noColor) {
   process.env.FORCE_COLOR = '3';
 }
 

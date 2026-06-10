@@ -43,6 +43,10 @@ beforeAll(async () => {
             { id: 'openai/gpt-oss-120b' },
             { id: 'openai/gpt-oss-20b' },
             { id: 'llama-3.3-70b-versatile' },
+            { id: 'anthropic/claude-sonnet-4.5' },
+            { id: 'deepseek-v4-pro' },
+            { id: 'deepseek-v4-flash' },
+            { id: 'deepseek-chat' },
           ],
         }),
       );
@@ -105,12 +109,16 @@ describe('listModels', () => {
       'openai/gpt-oss-120b',
       'openai/gpt-oss-20b',
       'llama-3.3-70b-versatile',
+      'anthropic/claude-sonnet-4.5',
+      'deepseek-v4-pro',
+      'deepseek-v4-flash',
+      'deepseek-chat',
     ]);
   });
 
   it('parses openai-compat /v1/models with bearer auth', async () => {
     const models = await listModels('openai-compat', `http://127.0.0.1:${port}/v1`, 'sk-fake');
-    expect(models.length).toBe(6);
+    expect(models.length).toBe(10);
   });
 
   it('parses Kimi /v1/models with bearer auth', async () => {
@@ -125,6 +133,20 @@ describe('listModels', () => {
       'openai/gpt-oss-20b',
       'llama-3.3-70b-versatile',
     ]);
+  });
+
+  it('parses OpenRouter /api/v1/models and prepends auto router', async () => {
+    const models = await listModels('openrouter', `http://127.0.0.1:${port}/v1`, 'sk-or-fake');
+    expect(models.slice(0, 3)).toEqual([
+      'openrouter/auto',
+      'qwen-coder-32b-instruct',
+      'gpt-4o-mini',
+    ]);
+  });
+
+  it('parses DeepSeek /models and prefers current model names', async () => {
+    const models = await listModels('deepseek', `http://127.0.0.1:${port}/v1`, 'sk-deepseek');
+    expect(models).toEqual(['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-chat']);
   });
 
   it('parses Gemini models and sorts PentesterFlow recommendations first', async () => {

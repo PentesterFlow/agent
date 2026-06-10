@@ -37,6 +37,14 @@ describe('modelReliabilityWarning', () => {
     expect(modelReliabilityWarning('groq', 'openai/gpt-oss-20b')).toContain('70b+');
   });
 
+  it('treats OpenRouter as a hosted provider for size warnings', () => {
+    expect(modelReliabilityWarning('openrouter', 'openai/gpt-oss-20b')).toContain('70b+');
+  });
+
+  it('treats DeepSeek as a hosted provider for size warnings', () => {
+    expect(modelReliabilityWarning('deepseek', 'openai/gpt-oss-20b')).toContain('70b+');
+  });
+
   it('treats Gemini as a hosted provider for size warnings', () => {
     expect(modelReliabilityWarning('gemini', 'gemma-4-26b-a4b-it')).toContain('70b+');
   });

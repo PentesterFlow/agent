@@ -11,6 +11,7 @@
 #   PENTESTERFLOW_INSTALL_DIR=/path   install location (default: ~/.local/bin)
 #   PENTESTERFLOW_SKILLS_DIR=/path    shipped skills location (default: ~/.pentesterflow/builtin-skills)
 #   PENTESTERFLOW_SKIP_SKILLS=1       install binary only
+#   PENTESTERFLOW_SKIP_CHECKSUM=1     install without SHA-256 verification (unsafe)
 set -eu
 
 REPO="${PENTESTERFLOW_REPO:-PentesterFlow/agent}"
@@ -70,30 +71,30 @@ info "downloading ${asset} (${ver})..."
 dl "${base}/${asset}" "${tmp}/${asset}" || err "download failed: ${base}/${asset}"
 [ -s "${tmp}/${asset}" ] || err "downloaded asset is empty: ${base}/${asset}"
 
-# --- verify checksum (best-effort) ---------------------------------------
-if dl_stdout "${base}/SHA256SUMS" >"${tmp}/SHA256SUMS" 2>/dev/null && [ -s "${tmp}/SHA256SUMS" ]; then
-  want=$(awk -v a="$asset" '$2==a {print $1}' "${tmp}/SHA256SUMS" | head -n1)
-  if [ -n "$want" ]; then
-    if command -v sha256sum >/dev/null 2>&1; then
-      got=$(sha256sum "${tmp}/${asset}" | awk '{print $1}')
-    elif command -v shasum >/dev/null 2>&1; then
-      got=$(shasum -a 256 "${tmp}/${asset}" | awk '{print $1}')
-    else
-      got=""
-    fi
-    if [ -n "$got" ] && [ "$got" != "$want" ]; then
-      err "checksum mismatch for ${asset} (expected ${want}, got ${got})"
-    fi
-    if [ -n "$got" ]; then
-      info "checksum ok"
-    else
-      info "warning: no SHA-256 tool found — skipping checksum verification"
-    fi
-  else
-    info "warning: SHA256SUMS does not contain ${asset} — skipping checksum verification"
-  fi
+# --- verify checksum (required; fail-closed) -----------------------------
+# A self-updating binary must not install an unverified download. Any failure
+# to verify is fatal. Set PENTESTERFLOW_SKIP_CHECKSUM=1 to override (e.g. an
+# air-gapped mirror you trust by other means).
+if [ "${PENTESTERFLOW_SKIP_CHECKSUM:-}" = "1" ]; then
+  info "warning: PENTESTERFLOW_SKIP_CHECKSUM=1 set — installing WITHOUT checksum verification"
 else
-  info "warning: SHA256SUMS unavailable — skipping checksum verification"
+  dl_stdout "${base}/SHA256SUMS" >"${tmp}/SHA256SUMS" 2>/dev/null ||
+    err "could not download SHA256SUMS from ${base} — refusing to install an unverified binary (set PENTESTERFLOW_SKIP_CHECKSUM=1 to override)"
+  [ -s "${tmp}/SHA256SUMS" ] ||
+    err "downloaded SHA256SUMS is empty — refusing to install an unverified binary"
+  want=$(awk -v a="$asset" '$2==a {print $1}' "${tmp}/SHA256SUMS" | head -n1)
+  [ -n "$want" ] ||
+    err "SHA256SUMS does not list ${asset} — refusing to install an unverified binary"
+  if command -v sha256sum >/dev/null 2>&1; then
+    got=$(sha256sum "${tmp}/${asset}" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    got=$(shasum -a 256 "${tmp}/${asset}" | awk '{print $1}')
+  else
+    err "no sha256sum/shasum tool found — cannot verify the download (set PENTESTERFLOW_SKIP_CHECKSUM=1 to override)"
+  fi
+  [ "$got" = "$want" ] ||
+    err "checksum mismatch for ${asset} (expected ${want}, got ${got})"
+  info "checksum ok"
 fi
 
 # --- install --------------------------------------------------------------

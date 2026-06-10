@@ -5,6 +5,32 @@ import { Box, Text, useInput } from 'ink';
 import { displayToolName } from '../tools/toolDisplay.js';
 import type { PermissionRequest } from './permBridge.js';
 
+// Tools whose `detail` is the literal thing being executed/sent (a shell
+// command, an HTTP request, a file write/edit). For these the user must see
+// the exact payload — not a summary — before approving, so we render the
+// detail verbatim in a code box rather than as dim, truncated prose.
+const COMMAND_TOOLS = new Set([
+  'shell',
+  'bash',
+  'BashTool',
+  'http',
+  'file_write',
+  'FileWriteTool',
+  'file_edit',
+  'FileEditTool',
+]);
+
+/** True when the request's detail is an exact command/payload worth showing. */
+export function isCommandTool(tool: string): boolean {
+  return COMMAND_TOOLS.has(tool);
+}
+
+// Command detail is shown in full up to a generous ceiling — far higher than
+// the prose cap, because approving a command you can't fully see is the exact
+// risk we're guarding against. Only a pathological multi-KB payload gets cut.
+const COMMAND_DETAIL_CAP = 8000;
+const PROSE_DETAIL_CAP = 1200;
+
 export function PermissionModal({
   req,
 }: {
@@ -21,6 +47,9 @@ export function PermissionModal({
     else if (ch === 'n') req.resolve('deny');
   });
 
+  const showDetail = req.detail && req.detail !== req.summary;
+  const asCommand = isCommandTool(req.tool);
+
   return (
     <Box
       borderStyle="round"
@@ -36,10 +65,18 @@ export function PermissionModal({
       <Box marginTop={1}>
         <Text color="white">{req.summary}</Text>
       </Box>
-      {req.detail && req.detail !== req.summary ? (
-        <Box marginTop={1}>
-          <Text color="gray">{truncate(req.detail, 1200)}</Text>
-        </Box>
+      {showDetail ? (
+        asCommand ? (
+          // Exact command/payload, framed and untruncated (within reason) so
+          // the user approves precisely what runs.
+          <Box marginTop={1} borderStyle="round" borderColor="gray" paddingX={1}>
+            <Text color="cyan">{truncate(req.detail, COMMAND_DETAIL_CAP)}</Text>
+          </Box>
+        ) : (
+          <Box marginTop={1}>
+            <Text color="gray">{truncate(req.detail, PROSE_DETAIL_CAP)}</Text>
+          </Box>
+        )
       ) : null}
       <Box marginTop={1}>
         <Text color="gray">

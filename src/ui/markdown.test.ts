@@ -3,8 +3,14 @@
 // is the chalk bold envelope; matching just the visible-text portion via
 // strip-ansi would let silent drops through).
 
-import { describe, expect, it } from 'vitest';
-import { renderMarkdown } from './markdown.js';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+let renderMarkdown: typeof import('./markdown.js').renderMarkdown;
+
+beforeAll(async () => {
+  vi.stubEnv('NO_COLOR', '');
+  ({ renderMarkdown } = await import('./markdown.js'));
+});
 
 // ESC is 0x1B; build the strip regex from a char-code so Biome's
 // no-control-characters-in-regex rule doesn't reject the literal.
@@ -197,5 +203,51 @@ describe('renderMarkdown', () => {
   it('keeps newlines so the transcript can window correctly', () => {
     const out = renderMarkdown('line1\nline2\nline3');
     expect(out.split('\n')).toHaveLength(3);
+  });
+
+  it('renders a link as "label (url)" with the label styled', () => {
+    const out = renderMarkdown('see [the advisory](https://example.com/cve)');
+    const stripped = stripAnsi(out);
+    expect(stripped).toBe('see the advisory (https://example.com/cve)');
+    // The label is actually styled (a style envelope is emitted), not raw.
+    expect(out).not.toBe(stripped);
+    // The raw markdown brackets are gone.
+    expect(stripped).not.toContain('](');
+  });
+
+  it('collapses a link whose label equals its url to just the url', () => {
+    const stripped = stripAnsi(renderMarkdown('[https://x.test](https://x.test)'));
+    expect(stripped).toBe('https://x.test');
+  });
+
+  it('does not let underscores in a link url trigger italics', () => {
+    const stripped = stripAnsi(renderMarkdown('[x](https://a.test/foo_bar_baz)'));
+    expect(stripped).toBe('x (https://a.test/foo_bar_baz)');
+  });
+
+  it('renders a pipe table as an aligned grid', () => {
+    const input = [
+      '| Vuln | Severity |',
+      '| --- | --- |',
+      '| IDOR | High |',
+      '| XSS | Medium |',
+    ].join('\n');
+    const lines = stripAnsi(renderMarkdown(input)).split('\n');
+    expect(lines).toHaveLength(4); // header + rule + 2 body rows
+    // Header cells present and column-padded to the widest cell ("Severity").
+    expect(lines[0]).toContain('Vuln');
+    expect(lines[0]).toContain('Severity');
+    // Separator rule uses box-drawing chars aligned on the column join.
+    expect(lines[1]).toContain('┼');
+    expect(lines[1]).toMatch(/^─+┼─+$/);
+    // Body rows aligned: the column separator sits at the same offset.
+    expect(lines[2]?.indexOf('│')).toBe(lines[3]?.indexOf('│'));
+    expect(lines[2]).toContain('IDOR');
+    expect(lines[3]).toContain('Medium');
+  });
+
+  it('leaves a lone pipe line that is not a table untouched', () => {
+    const stripped = stripAnsi(renderMarkdown('a | b without a separator row'));
+    expect(stripped).toBe('a | b without a separator row');
   });
 });

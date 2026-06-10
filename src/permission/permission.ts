@@ -3,11 +3,12 @@
 // requires permission. Tools call `prompter.ask(...)` and synchronously
 // wait for a Decision before running.
 //
-// YOLO wraps a Prompter and short-circuits to `allow-once` for every
-// request, bypassing the modal — EXCEPT requests flagged `bypassYolo`
-// (sensitive-file reads/writes), which always show the real prompt. The
-// shell denylist is a separate static guard inside the tool and always
-// fires regardless of prompter.
+// YOLO ("--yolo" / "--dangerously-skip-permissions") wraps a Prompter and
+// short-circuits EVERY request to `allow-once`, bypassing the modal entirely
+// — including sensitive-file and SSRF/private-host gates. This matches Claude
+// Code's --dangerously-skip-permissions: skip all approvals. The shell
+// denylist is a separate static guard inside the tool (a hard block, not a
+// prompt) and still fires regardless of YOLO.
 
 export type Decision = 'allow-once' | 'allow-session' | 'deny';
 
@@ -15,22 +16,28 @@ export interface Request {
   tool: string;
   summary: string;
   detail: string;
-  /** When true, YOLO must NOT auto-approve — defer to the real prompter.
-   *  Used for high-consequence operations (reading/writing credential
-   *  paths) where blanket YOLO consent is too dangerous. */
-  bypassYolo?: boolean;
   /** When true, an "allow session" decision is honored once but NOT cached
    *  — the next equivalent call re-prompts. Used for high-consequence
    *  requests, such as credential-path file access, where blanket session
-   *  consent should not silently carry forward. */
+   *  consent should not silently carry forward. (Has no effect under YOLO,
+   *  which auto-approves everything.) */
   noSessionCache?: boolean;
+  /** Session-cache identity. An "allow session" decision caches approval for
+   *  the (tool, cacheKey) pair; a request carrying a different cacheKey
+   *  re-prompts. When absent, approval is cached for the whole tool (legacy
+   *  broad behavior) — only safe for low-consequence tools. High-consequence
+   *  tools (shell, http, file writes) supply a per-invocation key (the
+   *  command, the request origin, the target path) so a single approval
+   *  cannot silently whitelist every later call of that tool. */
+  cacheKey?: string;
 }
 
 export interface Prompter {
   ask(req: Request, signal?: AbortSignal): Promise<Decision>;
 }
 
-/** Yolo wraps a Prompter and answers "allow-once" without prompting. */
+/** Yolo wraps a Prompter and answers "allow-once" for every request without
+ *  prompting — a complete skip of the approval flow when enabled. */
 export class YoloPrompter implements Prompter {
   private inner: Prompter;
   private yolo = false;
@@ -49,9 +56,10 @@ export class YoloPrompter implements Prompter {
   }
 
   async ask(req: Request, signal?: AbortSignal): Promise<Decision> {
-    // Sensitive operations (bypassYolo) always go through the real prompter,
-    // even in YOLO — blanket consent must not extend to credential paths.
-    if (this.yolo && !req.bypassYolo) return 'allow-once';
+    // YOLO auto-approves everything — no carve-outs (matches Claude Code's
+    // --dangerously-skip-permissions). The shell denylist still hard-blocks
+    // catastrophic commands inside the tool, independently of this.
+    if (this.yolo) return 'allow-once';
     return this.inner.ask(req, signal);
   }
 }

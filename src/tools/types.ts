@@ -15,8 +15,8 @@ export interface Tool {
   /** Optional risk hints applied to the permission request the registry
    *  builds for this tool (e.g. shell opts out of session caching). */
   permissionHints?(args: Record<string, unknown>): {
-    bypassYolo?: boolean;
     noSessionCache?: boolean;
+    cacheKey?: string;
   };
 }
 

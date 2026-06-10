@@ -31,6 +31,7 @@ interface GeminiResponse {
   }>;
   error?: { message?: string };
 }
+const CHAT_TIMEOUT_MS = 10 * 60 * 1000;
 
 export class GeminiClient implements Client, Pinger {
   readonly baseURL: string;
@@ -63,15 +64,16 @@ export class GeminiClient implements Client, Pinger {
 
   async chat(req: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
     const body = encodeRequest(req);
+    const combinedSignal = withTimeout(signal, CHAT_TIMEOUT_MS);
     let resp: Response;
     try {
       resp = await fetch(
-        `${this.baseURL}/${req.model || this.modelID}:generateContent?key=${encodeURIComponent(this.apiKey)}`,
+        `${this.baseURL}/${withModelsPrefix(req.model || this.modelID)}:generateContent?key=${encodeURIComponent(this.apiKey)}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-          signal,
+          signal: combinedSignal,
         },
       );
     } catch (err) {
@@ -81,7 +83,12 @@ export class GeminiClient implements Client, Pinger {
     if (resp.status !== 200) {
       throw classifyBackend('gemini', null, resp.status, raw);
     }
-    const out = JSON.parse(raw) as GeminiResponse;
+    let out: GeminiResponse;
+    try {
+      out = JSON.parse(raw) as GeminiResponse;
+    } catch {
+      throw classifyBackend('gemini', null, resp.status, `invalid JSON from gemini: ${raw}`);
+    }
     if (out.error?.message) {
       throw new Error(`gemini api error: ${out.error.message}`);
     }
@@ -113,6 +120,12 @@ export class GeminiClient implements Client, Pinger {
   }
 }
 
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  if (!signal) return timeout;
+  return AbortSignal.any([signal, timeout]);
+}
+
 function encodeRequest(req: ChatRequest): Record<string, unknown> {
   const systemText = req.messages
     .filter((m) => m.role === 'system')
@@ -131,11 +144,22 @@ function encodeRequest(req: ChatRequest): Record<string, unknown> {
   return body;
 }
 
+/** Ensure the model id carries the `models/` (or `tunedModels/`) prefix the
+ *  v1beta REST path requires, so a bare id from manual config doesn't build a
+ *  404 URL (L5). */
+function withModelsPrefix(id: string): string {
+  if (id.startsWith('models/') || id.startsWith('tunedModels/')) return id;
+  return `models/${id}`;
+}
+
 function encodeMessage(m: Message): GeminiContent[] {
   if (m.role === 'tool') {
     return [
       {
-        role: 'function',
+        // v1beta Content.role accepts only 'user' / 'model'. A functionResponse
+        // is delivered as a 'user' turn; the deprecated 'function' role makes
+        // newer models 400 on multi-turn tool use (M8).
+        role: 'user',
         parts: [
           {
             functionResponse: {

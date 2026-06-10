@@ -11,7 +11,7 @@
 // load_skill — re-reading it through this tool would just duplicate
 // content).
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import type { Prompter } from '../permission/permission.js';
 import type { Registry as SkillRegistry } from '../skills/registry.js';
@@ -101,6 +101,12 @@ export class ReadSkillFileTool implements Tool {
     if (!existsSync(resolved) || !statSync(resolved).isFile()) {
       return `error: not a file: ${path}`;
     }
+    // Re-check containment against the symlink-resolved real paths: the lexical
+    // check above is defeated by a symlink inside the skill dir, and this tool
+    // reads without a permission prompt.
+    if (!containedIn(skillDir, resolved)) {
+      return `error: path "${path}" escapes the skill directory via a symlink`;
+    }
     const bytes = statSync(resolved).size;
     const limit = Math.max(1, Math.min(5000, argNumber(args, 'limit') ?? 200));
     const raw = readFileSync(resolved, 'utf8');
@@ -113,6 +119,20 @@ export class ReadSkillFileTool implements Tool {
     const truncated = total > limit ? `\n...<truncated at ${limit} of ${total} lines>` : '';
     return `# ${skillName}/${rel} — ${total} line(s), ${bytes} bytes\n${body}${truncated}`;
   }
+}
+
+/** True if `target` stays inside `base` after both are symlink-resolved. */
+function containedIn(base: string, target: string): boolean {
+  let realBase: string;
+  let realTarget: string;
+  try {
+    realBase = realpathSync(base);
+    realTarget = realpathSync(target);
+  } catch {
+    return false;
+  }
+  const rel = relative(realBase, realTarget);
+  return rel === '' || (!rel.startsWith('..') && !rel.startsWith('/'));
 }
 
 function listFiles(dir: string, prefix = ''): string[] {

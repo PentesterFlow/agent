@@ -4,7 +4,79 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-06-06
+
+Hardening, model tuning, and a transcript/status overhaul, plus Claude
+Code-style permission bypass. Focus areas: the permission model, Kimi K2.6/K2.5
+behavior, and making long-running turns legible.
+
+### Added
+
+- **`--yolo` flag** — canonical short flag for permission-bypass mode;
+  `--dangerously-skip-permissions` is kept as an alias.
+- **SuperMode badge** — when permission-bypass is on, a right-aligned
+  `SuperMode` indicator is pinned to the status bar in every phase so it's
+  always clear that approvals are being skipped.
+- **`temperature` config option** — sent to providers that accept it;
+  automatically omitted for models that reject it (Kimi K2.6/K2.5 lock it to 1).
+- **`max_tokens` config option** — per-response token cap. Kimi defaults to
+  2048 (these models can't be slowed via temperature) so a turn can't narrate
+  unbounded; override per config.
+- **Kimi thinking toggle** — `thinking: disabled` is now sent for the reasoning
+  models that support it (K2.6/K2.5) to suppress the `reasoning_content` trace.
+- **Markdown tables and links** in the transcript — pipe tables render as an
+  aligned grid; `[label](url)` renders as styled `label (url)`.
+- **Structured HTTP responses** — `http` tool results color the status line by
+  class (2xx/3xx/4xx/5xx), dim header names, and syntax-highlight JSON bodies.
+- **First-class findings** — `confirm_finding` now renders a severity-colored
+  finding card instead of a generic tool line, and the `findings` filter keys
+  off it.
+- **Live turn feedback** — the busy status line names the in-flight tool and
+  shows an elapsed `m:ss` clock, so a slow tool is distinguishable from a hang.
+- **`NO_COLOR` support** — when `NO_COLOR` is set, the UI's chalk instances drop
+  to level 0 and color is not force-enabled (per no-color.org).
+
+### Changed
+
+- **Permission bypass now skips *everything*** — YOLO / `--yolo` /
+  `--dangerously-skip-permissions` auto-approves all prompts, including the
+  sensitive-file and SSRF/private-host gates (the `bypassYolo` carve-out was
+  removed), matching Claude Code's `--dangerously-skip-permissions`. The shell
+  denylist still hard-blocks catastrophic commands. **Breaking** for anyone who
+  relied on YOLO still prompting for credential paths.
+- **Session-scoped approvals** — an "allow session" decision is now keyed to the
+  specific command, request origin, or target path instead of the bare tool
+  name, so approving one `shell`/`http`/`file_write` call no longer whitelists
+  every later call of that tool for the session.
+- **Kimi auto-compaction sized to context window** — K2.6/K2.5 (256K) compact at
+  ~196K rather than the generic 16K default, so their large window is actually
+  used; small Moonshot models are tightened to avoid silent overflow.
+- **Permission modal shows the full command** — shell/http/file requests display
+  the exact, untruncated, code-styled payload being approved.
+
+### Fixed
+
+- **"Stuck on planning"** — streaming responses now advance the status phase to
+  "answering" on the first delta instead of showing "planning" for the entire
+  generation.
+- **Silent reasoning-model stalls** — `reasoning_content` deltas are streamed as
+  visible progress (and kept out of conversation history) so a reasoning model
+  no longer looks frozen while thinking.
+- **Kimi `temperature` 400s** — `temperature` is no longer sent to K2.6/K2.5,
+  which reject any value other than 1.
+
+### Security
+
+- **SSRF guard on the `http` tool** — requests whose host is (or resolves to) a
+  private, loopback, link-local, or cloud-metadata address require an explicit,
+  non-cached approval (shared with `web_fetch`); covers IPv4, IPv6, and
+  `::ffff:` mapped forms.
+- **Fail-closed self-update** — the installers (`install.sh`, `install.ps1`)
+  now refuse to install a binary they can't SHA-256 verify (missing
+  `SHA256SUMS`, missing checksum tool, or mismatch are all fatal). Override with
+  `PENTESTERFLOW_SKIP_CHECKSUM=1`.
+
+## [0.1.0] - 2026-05-31
 
 First public release of pentesterflow — an agentic offensive-security CLI for
 security engineers, professional penetration testers, and bug hunters.

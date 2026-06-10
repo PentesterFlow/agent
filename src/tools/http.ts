@@ -9,6 +9,7 @@
 import { Agent, fetch as undiciFetch } from 'undici';
 import type { Prompter } from '../permission/permission.js';
 import type { Target } from '../target/target.js';
+import { gatePrivateRequest, parseHTTPURL } from './privateHost.js';
 import { type Tool, argString } from './types.js';
 
 const RESPONSE_BYTE_CAP = 256 * 1024;
@@ -44,7 +45,8 @@ export class HTTPTool implements Tool {
       properties: {
         method: {
           type: 'string',
-          description: 'HTTP method (GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD).',
+          description:
+            'HTTP method (GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD). Defaults to GET.',
         },
         url: { type: 'string', description: 'Full URL including scheme.' },
         headers: {
@@ -54,7 +56,7 @@ export class HTTPTool implements Tool {
         },
         body: { type: 'string', description: 'Raw request body (optional).' },
       },
-      required: ['method', 'url'],
+      required: ['url'],
     };
   }
 
@@ -62,8 +64,21 @@ export class HTTPTool implements Tool {
     return true;
   }
 
+  // Scope an "allow session" approval to the request origin (scheme + host +
+  // port). Different origins re-prompt, so approving the engagement target
+  // can't silently license requests to internal hosts or cloud metadata.
+  permissionHints(args: Record<string, unknown>): { cacheKey: string } {
+    try {
+      return { cacheKey: new URL(this.resolveURL(argString(args, 'url'))).origin };
+    } catch {
+      // Unresolvable URL: fall back to a per-call key so nothing is cached
+      // broadly. run() will surface the real error.
+      return { cacheKey: argString(args, 'url') };
+    }
+  }
+
   summarize(args: Record<string, unknown>): { summary: string; detail: string } {
-    const method = argString(args, 'method').toUpperCase();
+    const method = (argString(args, 'method') || 'GET').toUpperCase();
     const url = argString(args, 'url');
     const body = argString(args, 'body');
     const headers = (args.headers ?? {}) as Record<string, unknown>;
@@ -81,13 +96,16 @@ export class HTTPTool implements Tool {
     return { summary: `http: ${method} ${url}`, detail };
   }
 
-  async run(args: Record<string, unknown>, signal: AbortSignal, _p: Prompter): Promise<string> {
-    const method = argString(args, 'method').toUpperCase();
+  async run(args: Record<string, unknown>, signal: AbortSignal, p: Prompter): Promise<string> {
+    const method = (argString(args, 'method') || 'GET').toUpperCase();
     const rawURL = argString(args, 'url');
     const body = argString(args, 'body');
-    if (!method || !rawURL) throw new Error('method and url are required');
+    if (!rawURL) throw new Error('url is required');
 
     const resolved = this.resolveURL(rawURL);
+    // SSRF guard: a request whose host is (or resolves to) a private/internal
+    // address requires an explicit, non-cached approval — even in YOLO.
+    await gatePrivateRequest(p, parseHTTPURL(resolved), signal, 'http');
 
     const headers = new Headers();
     const hdrsArg = args.headers;

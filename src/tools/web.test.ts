@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AlwaysDeny } from '../permission/permission.js';
 import type { Prompter } from '../permission/permission.js';
 import { WebFetchTool } from './web.js';
 
@@ -67,5 +68,57 @@ describe('WebFetchTool', () => {
     await expect(
       new WebFetchTool().run({ url: 'https://example.com' }, ctl.signal, prompter),
     ).rejects.toThrow('aborted');
+  });
+
+  it('prompts before fetching private or local URLs', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(
+      new WebFetchTool().run(
+        { url: 'http://127.0.0.1:3000/status' },
+        new AbortController().signal,
+        new AlwaysDeny(),
+      ),
+    ).rejects.toThrow(/private\/internal URL denied/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('does not automatically follow redirects', async () => {
+    const fetch = vi.fn(
+      async () => new Response('', { status: 302, headers: { location: 'http://127.0.0.1/' } }),
+    );
+    vi.stubGlobal('fetch', fetch);
+
+    await new WebFetchTool().run(
+      { url: 'https://example.com/redirect' },
+      new AbortController().signal,
+      prompter,
+    );
+
+    expect(fetch).toHaveBeenCalledWith(
+      'https://example.com/redirect',
+      expect.objectContaining({ redirect: 'manual' }),
+    );
+  });
+
+  it('prompts before fetching IPv4-mapped IPv6 private URLs', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(
+      new WebFetchTool().run(
+        { url: 'http://[::ffff:169.254.169.254]/latest/meta-data/' },
+        new AbortController().signal,
+        new AlwaysDeny(),
+      ),
+    ).rejects.toThrow(/private\/internal URL denied/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-HTTP URL schemes', async () => {
+    await expect(
+      new WebFetchTool().run({ url: 'file:///etc/passwd' }, new AbortController().signal, prompter),
+    ).rejects.toThrow(/unsupported URL scheme/);
   });
 });

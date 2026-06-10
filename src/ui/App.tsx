@@ -13,6 +13,8 @@ import { findActiveMention, listMentionDir, parseMentionPath } from '../agent/me
 import type { Backend } from '../config/config.js';
 import { listModels } from '../llm/models.js';
 import {
+  DEEPSEEK_DEFAULT_BASE_URL,
+  DEEPSEEK_MODELS,
   GEMINI_CHEAP_MODELS,
   GEMINI_DEFAULT_BASE_URL,
   GEMINI_RECOMMENDED_MODELS,
@@ -20,6 +22,8 @@ import {
   GROQ_MODELS,
   KIMI_DEFAULT_BASE_URL,
   KIMI_MODELS,
+  OPENROUTER_DEFAULT_BASE_URL,
+  OPENROUTER_RECOMMENDED_MODELS,
 } from '../llm/providers.js';
 import type { SessionDebugLog } from '../logger/sessionDebug.js';
 import { renderSkillTemplate } from '../skills/template.js';
@@ -36,6 +40,7 @@ import { StatusBar } from './StatusBar.js';
 import { useTerminalSize } from './TerminalSize.js';
 import { EntryView, Transcript } from './Transcript.js';
 import type { AskRequest } from './askBridge.js';
+import { chalkLevel } from './colorLevel.js';
 import { SLASH_ITEMS, filterSlash } from './slashItems.js';
 import type { Action, TranscriptEntry, TranscriptFilter } from './state.js';
 import { initialState, reducer } from './state.js';
@@ -109,7 +114,9 @@ export interface AppProps {
    *  it to surface "skill reloaded" without a modal. */
   bindNoticePublisher?: (publish: (text: string) => void) => void;
   /** Start the local Burp/PentesterFlow bridge on demand from /burp. */
-  startBurpBridge?: (port?: number) => Promise<{ url: string; alreadyRunning: boolean }>;
+  startBurpBridge?: (
+    port?: number,
+  ) => Promise<{ url: string; token: string; alreadyRunning: boolean }>;
   /** Optional recap inserted once when a saved session is resumed. */
   resumeSummary?: string;
 }
@@ -210,6 +217,13 @@ export function App({
       value: string,
       opts?: { transcriptUserText?: string; systemText?: string; runOptions?: AgentRunOptions },
     ) => {
+      if (agent.isRunning()) {
+        dispatch({
+          type: 'append',
+          entry: { kind: 'error', text: 'a turn is already running — cancel it with Esc first' },
+        });
+        return;
+      }
       sessionDebug?.write('turn_start', {
         prompt: value,
         transcript_user_text: opts?.transcriptUserText,
@@ -230,6 +244,14 @@ export function App({
         sessionDebug?.agentEvent(ev);
         if (ev.type === 'error' && isMaxStepsError(ev.err)) {
           const steps = ev.err.steps;
+          const rejectMaxSteps = () => {
+            dispatch({ type: 'set-ask', req: null });
+            dispatch({
+              type: 'append',
+              entry: { kind: 'system', text: 'stopped at max steps' },
+            });
+          };
+          ctl.signal.addEventListener('abort', rejectMaxSteps, { once: true });
           dispatch({
             type: 'append',
             entry: {
@@ -255,6 +277,7 @@ export function App({
                 ],
               },
               resolve: (label) => {
+                ctl.signal.removeEventListener('abort', rejectMaxSteps);
                 dispatch({ type: 'set-ask', req: null });
                 if (label === 'Continue') {
                   runAgentTurn('Continue from where you stopped and finish the current task.', {
@@ -268,11 +291,8 @@ export function App({
                 });
               },
               reject: () => {
-                dispatch({ type: 'set-ask', req: null });
-                dispatch({
-                  type: 'append',
-                  entry: { kind: 'system', text: 'stopped at max steps' },
-                });
+                ctl.signal.removeEventListener('abort', rejectMaxSteps);
+                rejectMaxSteps();
               },
             },
           });
@@ -334,6 +354,7 @@ export function App({
 
   useEffect(() => {
     const saveSnapshot = () => {
+      if (agent.isRunning()) return;
       if (snapshotSaving.current) return;
       snapshotSaving.current = true;
       void agent
@@ -354,6 +375,23 @@ export function App({
     const timer = setInterval(saveSnapshot, CONTEXT_SNAPSHOT_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [agent, sessionDebug]);
+
+  // Elapsed-time clock for the busy status line. A 1s ticker runs only while
+  // the agent is busy, so a long-running tool (a scan, a slow curl) shows a
+  // climbing timer instead of an indistinguishable-from-a-hang spinner.
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  useEffect(() => {
+    if (!state.busy) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const start = Date.now();
+    setElapsedSeconds(0);
+    const id = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [state.busy]);
 
   // Live terminal width via the TerminalSizeProvider mounted in
   // cli/index.ts. Subscribes to stdout `resize` so the layout reflows
@@ -790,6 +828,8 @@ export function App({
             transcriptFilter={state.transcriptFilter}
             target={target}
             expandHint={state.transcript.some((e) => e.collapsible && !e.expanded)}
+            runningTool={state.runningTool}
+            elapsedSeconds={elapsedSeconds}
           />
         </>
       )}
@@ -859,7 +899,7 @@ function handleSlash(
   ) => void,
   runAgentCompact: () => void,
   startBurpBridge:
-    | ((port?: number) => Promise<{ url: string; alreadyRunning: boolean }>)
+    | ((port?: number) => Promise<{ url: string; token: string; alreadyRunning: boolean }>)
     | undefined,
 ): boolean {
   const [cmd, ...rest] = raw.trim().split(/\s+/);
@@ -901,12 +941,45 @@ function handleSlash(
         entry: { kind: 'system', text: buildHelpText(agent, readConfig) },
       });
       return true;
-    case '/memory':
+    case '/memory': {
+      const sub = (rest[0] ?? '').toLowerCase();
+      if (sub === 'clear') {
+        void agent.clearMemory().then(() =>
+          dispatch({
+            type: 'append',
+            entry: { kind: 'system', text: 'session memory cleared' },
+          }),
+        );
+        return true;
+      }
+      if (sub === 'forget') {
+        const query = rest.slice(1).join(' ').trim();
+        if (!query) {
+          dispatch({
+            type: 'append',
+            entry: { kind: 'error', text: 'usage: /memory forget <text>' },
+          });
+          return true;
+        }
+        void agent.forgetMemory(query).then((removed) =>
+          dispatch({
+            type: 'append',
+            entry: {
+              kind: 'system',
+              text: removed.length
+                ? `forgot ${removed.length} item${removed.length === 1 ? '' : 's'}:\n${removed.map((r) => `- ${r}`).join('\n')}`
+                : `no memory items matched "${query}"`,
+            },
+          }),
+        );
+        return true;
+      }
       dispatch({
         type: 'append',
         entry: { kind: 'system', text: agent.formatMemory() },
       });
       return true;
+    }
     case '/snapshot':
       void agent
         .saveContextSnapshot('manual /snapshot')
@@ -947,8 +1020,8 @@ function handleSlash(
             entry: {
               kind: 'system',
               text: result.alreadyRunning
-                ? `Burp bridge already listening at ${result.url}`
-                : `Burp bridge listening at ${result.url}`,
+                ? `Burp bridge already listening at ${result.url}\nToken: ${result.token}`
+                : `Burp bridge listening at ${result.url}\nToken: ${result.token}`,
             },
           }),
         )
@@ -972,6 +1045,13 @@ function handleSlash(
       return true;
     }
     case '/next': {
+      if (agent.isRunning()) {
+        dispatch({
+          type: 'append',
+          entry: { kind: 'error', text: 'next: a turn is already running' },
+        });
+        return true;
+      }
       const objective = rest.join(' ').trim();
       void agent
         .coverageContext(new AbortController().signal)
@@ -1401,14 +1481,16 @@ function handleSkillsCommand(
 // renders consistently regardless of the parent component's color
 // inference. The transcript's role-color wrapper doesn't strip embedded
 // ANSI, so accents survive into render.
-const helpChalk = new Chalk({ level: 3 });
+const helpChalk = new Chalk({ level: chalkLevel() });
 
 const KEYBINDINGS: Array<{ keys: string; desc: string }> = [
   { keys: '@<file>', desc: 'inline a file into the next turn (Tab opens a picker)' },
   { keys: '/', desc: 'open the slash-command menu' },
   { keys: '↑ / ↓', desc: 'walk session prompt history (on first / last line of input)' },
-  { keys: 'Shift-Enter', desc: 'newline inside the input' },
+  { keys: 'Ctrl-N / Ctrl-J', desc: 'insert a newline inside the input' },
+  { keys: 'Ctrl-A / Ctrl-E', desc: 'jump to start / end of the current line' },
   { keys: 'Ctrl-O', desc: 'reprint the latest truncated tool output in full' },
+  { keys: 'Ctrl-F', desc: 'cycle the transcript filter' },
   { keys: 'mouse wheel / scrollbar', desc: 'scroll the conversation (native terminal scrollback)' },
   { keys: 'Esc', desc: 'cancel an in-flight turn / clear the input draft' },
   { keys: 'Ctrl-C', desc: 'quit pentesterflow' },
@@ -1524,6 +1606,8 @@ function openProviderPicker(
   const labelKimi = `Kimi${cur.backend === 'kimi' ? ' (current)' : ''}`;
   const labelGroq = `Groq${cur.backend === 'groq' ? ' (current)' : ''}`;
   const labelGemini = `Gemini${cur.backend === 'gemini' ? ' (current)' : ''}`;
+  const labelOpenRouter = `OpenRouter${cur.backend === 'openrouter' ? ' (current)' : ''}`;
+  const labelDeepSeek = `DeepSeek${cur.backend === 'deepseek' ? ' (current)' : ''}`;
 
   const req: AskRequest = {
     question: {
@@ -1545,6 +1629,14 @@ function openProviderPicker(
           description: 'remote — Gemini API with native tool calls',
         },
         {
+          label: labelOpenRouter,
+          description: 'remote — openrouter.ai OpenAI-compatible API',
+        },
+        {
+          label: labelDeepSeek,
+          description: 'remote — api.deepseek.com OpenAI-compatible API',
+        },
+        {
           label: labelOAI,
           description: 'remote — needs base URL + API key (uses current config values)',
         },
@@ -1562,7 +1654,11 @@ function openProviderPicker(
               ? 'groq'
               : picked.startsWith('Gemini')
                 ? 'gemini'
-                : 'openai-compat';
+                : picked.startsWith('OpenRouter')
+                  ? 'openrouter'
+                  : picked.startsWith('DeepSeek')
+                    ? 'deepseek'
+                    : 'openai-compat';
       const config = readConfig();
       // For openai-compat we need URL + key already in config.
       if (backend === 'openai-compat' && (!config.baseURL || !config.apiKey)) {
@@ -1672,6 +1768,68 @@ function openProviderPicker(
           });
         return;
       }
+      if (backend === 'openrouter' && (config.backend !== 'openrouter' || !config.apiKey)) {
+        void promptSecret({
+          header: 'OpenRouter',
+          question: 'Enter OpenRouter API key (OPENROUTER_API_KEY)',
+          placeholder: 'sk-or-...',
+        })
+          .then((apiKey) => {
+            if (!apiKey) {
+              dispatch({
+                type: 'append',
+                entry: { kind: 'error', text: 'OpenRouter API key cannot be empty.' },
+              });
+              return;
+            }
+            void fetchAndPickModel(
+              backend,
+              OPENROUTER_DEFAULT_BASE_URL,
+              apiKey,
+              dispatch,
+              applyProvider,
+              { successText: (picked) => `provider set to OpenRouter · model ${picked}` },
+            );
+          })
+          .catch(() => {
+            dispatch({
+              type: 'append',
+              entry: { kind: 'system', text: 'OpenRouter setup cancelled.' },
+            });
+          });
+        return;
+      }
+      if (backend === 'deepseek' && (config.backend !== 'deepseek' || !config.apiKey)) {
+        void promptSecret({
+          header: 'DeepSeek',
+          question: 'Enter DeepSeek API key (DEEPSEEK_API_KEY)',
+          placeholder: 'sk-...',
+        })
+          .then((apiKey) => {
+            if (!apiKey) {
+              dispatch({
+                type: 'append',
+                entry: { kind: 'error', text: 'DeepSeek API key cannot be empty.' },
+              });
+              return;
+            }
+            void fetchAndPickModel(
+              backend,
+              DEEPSEEK_DEFAULT_BASE_URL,
+              apiKey,
+              dispatch,
+              applyProvider,
+              { successText: (picked) => `provider set to DeepSeek · model ${picked}` },
+            );
+          })
+          .catch(() => {
+            dispatch({
+              type: 'append',
+              entry: { kind: 'system', text: 'DeepSeek setup cancelled.' },
+            });
+          });
+        return;
+      }
       const baseURL =
         backend === 'openai-compat'
           ? config.baseURL
@@ -1687,7 +1845,15 @@ function openProviderPicker(
                 ? config.backend === 'gemini'
                   ? config.baseURL || GEMINI_DEFAULT_BASE_URL
                   : GEMINI_DEFAULT_BASE_URL
-                : config.backendBaseURL(backend);
+                : backend === 'openrouter'
+                  ? config.backend === 'openrouter'
+                    ? config.baseURL || OPENROUTER_DEFAULT_BASE_URL
+                    : OPENROUTER_DEFAULT_BASE_URL
+                  : backend === 'deepseek'
+                    ? config.backend === 'deepseek'
+                      ? config.baseURL || DEEPSEEK_DEFAULT_BASE_URL
+                      : DEEPSEEK_DEFAULT_BASE_URL
+                    : config.backendBaseURL(backend);
       const apiKey = backend === 'openai-compat' || config.backend === backend ? config.apiKey : '';
       void fetchAndPickModel(backend, baseURL, apiKey, dispatch, applyProvider);
     },
@@ -1809,6 +1975,10 @@ function modelDescription(
   if (currentModel && model === currentModel) parts.push('current / used before');
   if (backend === 'kimi' && KIMI_MODELS.includes(model)) parts.push('Kimi/Moonshot');
   if (backend === 'groq' && GROQ_MODELS.includes(model)) parts.push('Groq');
+  if (backend === 'openrouter' && OPENROUTER_RECOMMENDED_MODELS.includes(model)) {
+    parts.push('OpenRouter router');
+  }
+  if (backend === 'deepseek' && DEEPSEEK_MODELS.includes(model)) parts.push('DeepSeek');
   if (backend === 'gemini') {
     if (GEMINI_CHEAP_MODELS.includes(model)) parts.push('cheap cost');
     else if (GEMINI_RECOMMENDED_MODELS.includes(model)) parts.push('best fit');

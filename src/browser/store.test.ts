@@ -45,4 +45,17 @@ describe('CaptureStore Burp bridge', () => {
     expect(store.listBurpTasks()).toEqual([]);
     expect(store.listBurpIssues()).toEqual([]);
   });
+
+  it('truncates large captured bodies before retaining them', () => {
+    const store = new CaptureStore();
+    store.ingest({
+      url: 'https://app.example.com/api',
+      method: 'GET',
+      respBody: 'a'.repeat(100_000),
+    });
+
+    const body = store.listRequests()[0]?.responseBody ?? '';
+    expect(body).toContain('truncated');
+    expect(body.length).toBeLessThan(70_000);
+  });
 });

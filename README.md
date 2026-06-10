@@ -181,6 +181,12 @@ MOONSHOT_API_KEY=sk-... pentesterflow --backend kimi --model kimi-k2.6
 # Groq
 GROQ_API_KEY=gsk_... pentesterflow --backend groq --model openai/gpt-oss-20b
 
+# OpenRouter
+OPENROUTER_API_KEY=sk-or-... pentesterflow --backend openrouter --model openrouter/auto
+
+# DeepSeek
+DEEPSEEK_API_KEY=sk-... pentesterflow --backend deepseek --model deepseek-v4-flash
+
 # Gemini
 GEMINI_API_KEY=AIza... pentesterflow --backend gemini --model models/gemini-3.5-flash
 ```
@@ -331,7 +337,7 @@ binary exposes the same capture data as an MCP server for compatible clients.
 | `/compact` | Summarize into persistent session memory. |
 | `/memory` | Show current persistent session memory. |
 | `/snapshot` | Write a redacted context snapshot now. |
-| `/burp [port]` | Start the local Burp/PentesterFlow bridge. |
+| `/burp [port]` | Start the local Burp/PentesterFlow bridge and print its URL + token. |
 | `/skills [enable\|disable\|new <name>]` | Manage or scaffold skills. |
 | `/maxsteps <n>` | Set the per-turn tool-call cap. |
 | `/thinking on\|off` | Toggle visible reasoning guidance. |
@@ -346,7 +352,7 @@ binary exposes the same capture data as an MCP server for compatible clients.
 
 | Flag | Description |
 |---|---|
-| `--backend ollama\|lmstudio\|kimi\|groq\|gemini\|openai-compat` | Select the LLM backend. |
+| `--backend ollama\|lmstudio\|kimi\|groq\|openrouter\|deepseek\|gemini\|openai-compat` | Select the LLM backend. |
 | `--model <id>` | Set the model id. |
 | `--base-url <url>` / `--api-key <key>` | Configure remote or OpenAI-compatible backends. |
 | `--skills <dirs>` | Load extra skill directories. |
@@ -355,7 +361,7 @@ binary exposes the same capture data as an MCP server for compatible clients.
 | `--burp [port]` | Start the local Burp/PentesterFlow bridge. |
 | `--browser-ingest [port]` | Deprecated alias for `--burp`. |
 | `--no-stream` | Disable streaming for providers with SSE/tool-call issues. |
-| `--dangerously-skip-permissions` | Auto-approve non-sensitive tool calls. |
+| `--yolo` | YOLO mode: auto-approve non-sensitive tool calls (alias: `--dangerously-skip-permissions`). |
 | `--list-tools` / `--list-skills` | Print registered tools or discovered skills. |
 | `--log <path>` | Override the JSON-lines log path. |
 | `--debug-session` | Write a full JSON-lines debug session log. |
