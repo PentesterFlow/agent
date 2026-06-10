@@ -14,6 +14,7 @@ import { newRegistry } from '../skills/registry.js';
 import { Target } from '../target/target.js';
 import { Registry as ToolRegistry } from '../tools/registry.js';
 import { runSelfUpdate } from '../update/selfUpdate.js';
+import { DEFAULT_OLLAMA_BASE_URL } from '../config/config.js';
 import { App, type AppProps } from './App.js';
 import type { BannerData } from './Banner.js';
 import { TerminalSizeProvider } from './TerminalSize.js';
@@ -54,12 +55,25 @@ let setYolo: ReturnType<typeof vi.fn>;
 let applyProvider: ReturnType<typeof vi.fn>;
 let mounted: ReturnType<typeof render> | null = null;
 
+function stubReadConfig(
+  overrides: Partial<ReturnType<AppProps['readConfig']>> = {},
+): ReturnType<AppProps['readConfig']> {
+  return {
+    backend: 'ollama',
+    baseURL: '',
+    apiKey: '',
+    model: 'stub-model',
+    backendBaseURL: () => DEFAULT_OLLAMA_BASE_URL,
+    ...overrides,
+  };
+}
+
 function makeProps(overrides: Partial<AppProps> = {}): AppProps {
   return {
     agent,
     bannerData,
     parentSignal: new AbortController().signal,
-    readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+    readConfig: () => stubReadConfig(),
     applyProvider,
     setYolo,
     ...overrides,
@@ -187,7 +201,7 @@ describe('UI slash commands (terminal integration)', () => {
 
   it('/provider can collect and test a Kimi API key before model selection', async () => {
     mounted = renderApp({
-      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+      readConfig: () => stubReadConfig(),
     });
     await tick();
     await submit(mounted.stdin, '/provider');
@@ -221,12 +235,13 @@ describe('UI slash commands (terminal integration)', () => {
 
   it('/provider asks for a Kimi key instead of reusing another provider key', async () => {
     mounted = renderApp({
-      readConfig: () => ({
-        backend: 'groq',
-        baseURL: 'https://api.groq.com/openai/v1',
-        apiKey: 'gsk-existing',
-        model: 'openai/gpt-oss-20b',
-      }),
+      readConfig: () =>
+        stubReadConfig({
+          backend: 'groq',
+          baseURL: 'https://api.groq.com/openai/v1',
+          apiKey: 'gsk-existing',
+          model: 'openai/gpt-oss-20b',
+        }),
     });
     await tick();
     await submit(mounted.stdin, '/provider');
@@ -249,7 +264,7 @@ describe('UI slash commands (terminal integration)', () => {
 
   it('/provider can collect and test a Groq API key before model selection', async () => {
     mounted = renderApp({
-      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+      readConfig: () => stubReadConfig(),
     });
     await tick();
     await submit(mounted.stdin, '/provider');
@@ -293,7 +308,7 @@ describe('UI slash commands (terminal integration)', () => {
       'models/gemini-flash-lite-latest',
     ]);
     mounted = renderApp({
-      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+      readConfig: () => stubReadConfig(),
     });
     await tick();
     await submit(mounted.stdin, '/provider');
@@ -435,7 +450,7 @@ describe('UI slash commands (terminal integration)', () => {
     await submit(mounted.stdin, '/model list');
     await tick();
 
-    expect(listModels).toHaveBeenCalledWith('ollama', '', '');
+    expect(listModels).toHaveBeenCalledWith('ollama', DEFAULT_OLLAMA_BASE_URL, '');
     const frame = mounted.lastFrame() ?? '';
     expect(frame).toContain('Select model for ollama');
     expect(frame).toContain('stub-model');

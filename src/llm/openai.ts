@@ -1,3 +1,5 @@
+import { DEFAULT_LMSTUDIO_BASE_URL } from '../config/config.js';
+
 // OpenAI-compatible backend. Covers LM Studio, vLLM, llama.cpp server,
 // and remote OpenAI-compatible providers.
 //
@@ -113,7 +115,7 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
   static lmStudio(baseURL: string, model: string): OpenAIClient {
     // LM Studio ignores auth — pass empty so the Authorization header is
     // omitted entirely (the chat/ping paths already guard on apiKey).
-    return new OpenAIClient(baseURL || 'http://localhost:1234/v1', '', model, 'lmstudio');
+    return new OpenAIClient(baseURL || DEFAULT_LMSTUDIO_BASE_URL, '', model, 'lmstudio');
   }
 
   name(): string {
