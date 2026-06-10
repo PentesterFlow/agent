@@ -36,7 +36,7 @@ export class OllamaClient implements Client, StreamingClient, Pinger {
   readonly modelID: string;
 
   constructor(baseURL: string, model: string) {
-    this.baseURL = baseURL || 'http://localhost:11434';
+    this.baseURL = baseURL || 'http://172.16.205.200:11434';
     this.modelID = model;
   }
 

@@ -207,7 +207,7 @@ describe('OpenAIClient', () => {
 
   it('lmStudio factory uses the right default URL', () => {
     const c = OpenAIClient.lmStudio('', 'q');
-    expect(c.baseURL).toBe('http://localhost:1234/v1');
+    expect(c.baseURL).toBe('http://172.16.205.200:1234/v1');
     expect(c.name()).toBe('lmstudio');
   });
 

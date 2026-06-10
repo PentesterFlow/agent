@@ -19,8 +19,8 @@ import {
 const DEFAULT_TIMEOUT_MS = 5_000;
 
 const DEFAULT_BASE_URL: Record<Exclude<Backend, ''>, string> = {
-  ollama: 'http://localhost:11434',
-  lmstudio: 'http://localhost:1234/v1',
+  ollama: 'http://172.16.205.200:11434',
+  lmstudio: 'http://172.16.205.200:1234/v1',
   'openai-compat': '',
   kimi: KIMI_DEFAULT_BASE_URL,
   groq: GROQ_DEFAULT_BASE_URL,

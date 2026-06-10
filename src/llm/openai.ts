@@ -113,7 +113,7 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
   static lmStudio(baseURL: string, model: string): OpenAIClient {
     // LM Studio ignores auth — pass empty so the Authorization header is
     // omitted entirely (the chat/ping paths already guard on apiKey).
-    return new OpenAIClient(baseURL || 'http://localhost:1234/v1', '', model, 'lmstudio');
+    return new OpenAIClient(baseURL || 'http://172.16.205.200:1234/v1', '', model, 'lmstudio');
   }
 
   name(): string {
