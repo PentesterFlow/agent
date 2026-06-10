@@ -213,8 +213,19 @@ async function main(): Promise<number> {
   process.on('SIGTERM', () => onSig('SIGTERM'));
   process.on('SIGHUP', () => onSig('SIGHUP'));
 
-  // Config.
-  let cfg = config.load();
+  // Config — required on every launch; see ~/.pentesterflow/config.json or ./config.json.
+  let cfg: config.Config;
+  try {
+    cfg = config.load();
+  } catch (err) {
+    if (err instanceof config.ConfigNotFoundError) {
+      process.stderr.write(`${err.formatMessage()}\n`);
+      return 1;
+    }
+    process.stderr.write(`${(err as Error).message}\n`);
+    return 1;
+  }
+  process.stderr.write(`config: ${config.loadedConfigPath()}\n`);
   if (flags.backend) cfg = { ...cfg, backend: flags.backend as config.Config['backend'] };
   if (flags.model) cfg.model = flags.model;
   if (flags.baseURL) cfg.base_url = flags.baseURL;
@@ -563,7 +574,7 @@ async function main(): Promise<number> {
   const bannerData: BannerData = {
     provider: providerLabel(cfg.backend),
     model: client.model() || cfg.model || '(unset)',
-    endpoint: cfg.base_url || defaultEndpoint(cfg.backend),
+    endpoint: cfg.base_url || defaultEndpoint(cfg, cfg.backend),
     state: localityFor(cfg.backend),
     status: `Session ${sessionID.slice(0, 8)} — type /help to begin`,
     cwd: prettyCwd(),
@@ -596,7 +607,7 @@ async function main(): Promise<number> {
     const ctxP =
       cfg.backend === 'ollama' || cfg.backend === ''
         ? detectOllamaContextWindow(
-            cfg.base_url || defaultEndpoint(cfg.backend),
+            config.resolveBackendBaseUrl(cfg, 'ollama'),
             agent.client.model(),
             signal,
           ).then((info) => {
@@ -653,6 +664,7 @@ async function main(): Promise<number> {
           baseURL: cfg.base_url,
           apiKey: cfg.api_key,
           model: cfg.model,
+          backendBaseURL: (backend) => config.resolveBackendBaseUrl(cfg, backend),
         }),
         persistDisabledSkills: async (names: string[]) => {
           cfg.disabled_skills = [...names].sort();
@@ -673,7 +685,7 @@ async function main(): Promise<number> {
           bannerHolder.publish?.({
             provider: providerLabel(cfg.backend),
             model: next.model() || cfg.model || '(unset)',
-            endpoint: cfg.base_url || defaultEndpoint(cfg.backend),
+            endpoint: cfg.base_url || defaultEndpoint(cfg, cfg.backend),
             state: localityFor(cfg.backend),
           });
           void runProbes(rootCtl.signal);
@@ -735,13 +747,11 @@ function localityFor(b: string): string {
     : 'local';
 }
 
-function defaultEndpoint(b: string): string {
+function defaultEndpoint(cfg: config.Config, b: string): string {
+  if (b === 'ollama' || b === '' || b === 'lmstudio') {
+    return config.resolveBackendBaseUrl(cfg, b as config.Backend);
+  }
   switch (b) {
-    case 'ollama':
-    case '':
-      return 'http://localhost:11434';
-    case 'lmstudio':
-      return 'http://localhost:1234/v1';
     case 'kimi':
       return KIMI_DEFAULT_BASE_URL;
     case 'groq':

@@ -81,7 +81,14 @@ export interface AppProps {
   bindAskPublisher?: (publish: (req: import('./askBridge.js').AskRequest | null) => void) => void;
   yoloInitial?: boolean;
   /** Read the live config so /provider picker knows current backend / URL / key. */
-  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string };
+  readConfig: () => {
+    backend: Backend;
+    baseURL: string;
+    apiKey: string;
+    model: string;
+    /** Effective base URL for a backend (respects per-backend config defaults). */
+    backendBaseURL: (backend: Backend) => string;
+  };
   /** Mutate config + swap agent client + persist. Used by /provider and /model. */
   applyProvider: ApplyProvider;
   /** Flip live YOLO gating on the prompter. Wired by the CLI to
@@ -841,7 +848,7 @@ function handleSlash(
   clearScreen: () => void,
   yolo: boolean,
   applyYolo: (on: boolean) => void,
-  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string },
+  readConfig: AppProps['readConfig'],
   applyProvider: ApplyProvider,
   promptSecret: (req: Omit<SecretInputRequest, 'resolve' | 'reject'>) => Promise<string>,
   persistDisabledSkills: PersistDisabledSkills | undefined,
@@ -1011,10 +1018,17 @@ function handleSlash(
       }
       const cur = readConfig();
       if (m.toLowerCase() === 'list' || m.toLowerCase() === 'ls') {
-        void fetchAndPickModel(cur.backend, cur.baseURL, cur.apiKey, dispatch, applyProvider, {
-          currentModel: cur.model || agent.client.model(),
-          successText: (picked) => `model set to ${picked}`,
-        });
+        void fetchAndPickModel(
+          cur.backend,
+          cur.backendBaseURL(cur.backend),
+          cur.apiKey,
+          dispatch,
+          applyProvider,
+          {
+            currentModel: cur.model || agent.client.model(),
+            successText: (picked) => `model set to ${picked}`,
+          },
+        );
         return true;
       }
       // Validate the id against the live backend catalog before swapping
@@ -1024,7 +1038,7 @@ function handleSlash(
       void (async () => {
         let known: string[] = [];
         try {
-          known = await listModels(cur.backend, cur.baseURL, cur.apiKey);
+          known = await listModels(cur.backend, cur.backendBaseURL(cur.backend), cur.apiKey);
         } catch (err) {
           // Soft fail: if listing isn't available we still proceed,
           // since some custom endpoints don't implement /models.
@@ -1412,10 +1426,7 @@ function pad(s: string, n: number): string {
   return s.length >= n ? s : s + ' '.repeat(n - s.length);
 }
 
-function buildHelpText(
-  agent: Agent,
-  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string },
-): string {
+function buildHelpText(agent: Agent, readConfig: AppProps['readConfig']): string {
   const c = helpChalk;
   const cfg = readConfig();
   const enabled = agent.skills.listEnabled().length;
@@ -1496,7 +1507,13 @@ function buildHelpText(
  *  arrow-key + Enter handling works without modification. */
 function openProviderPicker(
   dispatch: React.Dispatch<Action>,
-  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string },
+  readConfig: () => {
+    backend: Backend;
+    baseURL: string;
+    apiKey: string;
+    model: string;
+    backendBaseURL: (backend: Backend) => string;
+  },
   applyProvider: ApplyProvider,
   promptSecret: (req: Omit<SecretInputRequest, 'resolve' | 'reject'>) => Promise<string>,
 ): void {
@@ -1670,7 +1687,7 @@ function openProviderPicker(
                 ? config.backend === 'gemini'
                   ? config.baseURL || GEMINI_DEFAULT_BASE_URL
                   : GEMINI_DEFAULT_BASE_URL
-                : '';
+                : config.backendBaseURL(backend);
       const apiKey = backend === 'openai-compat' || config.backend === backend ? config.apiKey : '';
       void fetchAndPickModel(backend, baseURL, apiKey, dispatch, applyProvider);
     },

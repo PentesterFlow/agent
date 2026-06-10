@@ -1,3 +1,5 @@
+import { DEFAULT_OLLAMA_BASE_URL } from '../config/config.js';
+
 // Ollama backend. behavior:
 // - POST /api/chat with stream=true emits ND-JSON; accumulate tool calls
 //   as they arrive (the terminal `done:true` chunk often carries an empty
@@ -35,7 +37,7 @@ export class OllamaClient implements Client, StreamingClient, Pinger {
   readonly modelID: string;
 
   constructor(baseURL: string, model: string) {
-    this.baseURL = baseURL || 'http://localhost:11434';
+    this.baseURL = baseURL || DEFAULT_OLLAMA_BASE_URL;
     this.modelID = model;
   }
 

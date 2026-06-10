@@ -92,4 +92,15 @@ describe('newFromConfig', () => {
 
     expect(() => newFromConfig(cfg)).toThrow(/GEMINI_API_KEY/);
   });
+
+  it('uses ollama_base_url from config when base_url is empty', () => {
+    const cfg = defaultConfig();
+    cfg.backend = 'ollama';
+    cfg.ollama_base_url = 'http://192.168.1.5:11434';
+
+    const client = newFromConfig(cfg);
+
+    expect(client.name()).toBe('ollama');
+    expect((client as { baseURL: string }).baseURL).toBe('http://192.168.1.5:11434');
+  });
 });

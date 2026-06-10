@@ -2,7 +2,11 @@
 // interactive /provider flow to populate the model picker after the user
 // chooses Ollama / LM Studio / openai-compat / Kimi / Groq / OpenRouter / DeepSeek / Gemini.
 
-import type { Backend } from '../config/config.js';
+import {
+  type Backend,
+  DEFAULT_LMSTUDIO_BASE_URL,
+  DEFAULT_OLLAMA_BASE_URL,
+} from '../config/config.js';
 import {
   DEEPSEEK_DEFAULT_BASE_URL,
   DEEPSEEK_MODELS,
@@ -19,8 +23,8 @@ import {
 const DEFAULT_TIMEOUT_MS = 5_000;
 
 const DEFAULT_BASE_URL: Record<Exclude<Backend, ''>, string> = {
-  ollama: 'http://localhost:11434',
-  lmstudio: 'http://localhost:1234/v1',
+  ollama: DEFAULT_OLLAMA_BASE_URL,
+  lmstudio: DEFAULT_LMSTUDIO_BASE_URL,
   'openai-compat': '',
   kimi: KIMI_DEFAULT_BASE_URL,
   groq: GROQ_DEFAULT_BASE_URL,

@@ -1,6 +1,6 @@
 // Build the right Client from the parsed Config.
 
-import type { Config } from '../config/config.js';
+import { type Config, resolveBackendBaseUrl } from '../config/config.js';
 import type { Client } from './client.js';
 import { GeminiClient } from './gemini.js';
 import { OllamaClient } from './ollama.js';
@@ -26,9 +26,9 @@ export function newFromConfig(cfg: Config): Client {
   switch (cfg.backend) {
     case 'ollama':
     case '':
-      return new OllamaClient(cfg.base_url, cfg.model);
+      return new OllamaClient(resolveBackendBaseUrl(cfg, 'ollama'), cfg.model);
     case 'lmstudio':
-      return OpenAIClient.lmStudio(cfg.base_url, cfg.model);
+      return OpenAIClient.lmStudio(resolveBackendBaseUrl(cfg, 'lmstudio'), cfg.model);
     case 'openai-compat':
       if (!cfg.base_url) {
         throw new Error('openai-compat backend requires base_url');
