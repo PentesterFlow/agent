@@ -790,9 +790,9 @@ function defaultEndpoint(b: string): string {
   switch (b) {
     case 'ollama':
     case '':
-      return 'http://localhost:11434';
+      return 'http://172.16.205.200:11434';
     case 'lmstudio':
-      return 'http://localhost:1234/v1';
+      return 'http://172.16.205.200:1234/v1';
     case 'kimi':
       return KIMI_DEFAULT_BASE_URL;
     case 'groq':
