@@ -11,6 +11,31 @@ const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 32 * 1024;
 
+// Windows has no /bin/sh or /bin/bash, so spawning the Unix shell path fails
+// with `ENOENT: no such file or directory, uv_spawn '/bin/sh'`. On Windows we
+// run commands through PowerShell instead — it is closer to the Unix idioms the
+// tool descriptions assume than cmd.exe, and supports pipelines/quoting cleanly.
+// Override with PFLOW_WINDOWS_SHELL (e.g. "pwsh.exe" or "%ComSpec%") if needed.
+// Evaluated at call time (not module load) so tests can exercise both paths.
+function isWindows(): boolean {
+  return process.platform === 'win32';
+}
+
+/**
+ * Build the spawn target for a command string on the current platform.
+ * POSIX: `<unixShell> -c "<command>"`. Windows: PowerShell `-Command`.
+ */
+export function shellInvocation(
+  unixShell: string,
+  command: string,
+): { cmd: string; argv: string[] } {
+  if (isWindows()) {
+    const shell = process.env.PFLOW_WINDOWS_SHELL || 'powershell.exe';
+    return { cmd: shell, argv: ['-NoProfile', '-NonInteractive', '-Command', command] };
+  }
+  return { cmd: unixShell, argv: ['-c', command] };
+}
+
 /**
  * Advisory denylist for catastrophic commands. This is defense-in-depth
  * behind the per-command permission prompt, NOT a security boundary — a
@@ -99,6 +124,14 @@ export class ShellTool implements Tool {
   }
 
   description(): string {
+    if (isWindows()) {
+      return [
+        'Run a shell command via PowerShell on the local machine. Primary use case is curl/Invoke-WebRequest plus standard utilities for HTTP testing, file inspection, and one-liners. The user will be prompted to approve each command. Capture concise output — pipe through `Select-Object -First` for huge outputs. Do not run interactive commands. Authorized engagements only.',
+        'Write PowerShell-compatible commands. Unix-only tools (grep, sed, awk, jq) may be absent; prefer PowerShell equivalents (Select-String, -replace, ConvertFrom-Json) unless you know the tool is installed.',
+        '',
+        'Default to curl/Invoke-WebRequest for HTTP work; only use specialized scanners (ffuf, nuclei, sqlmap, etc.) when the user explicitly asks for them.',
+      ].join('\n');
+    }
     return [
       'Run a shell command via /bin/sh -c on the local machine. Primary use case is curl + standard Unix utilities (jq, grep, awk, sed, head, sort, uniq) for HTTP testing, file inspection, and bash one-liners. The user will be prompted to approve each command. Capture concise output — pipe through `head` for huge outputs. Do not run interactive commands. Authorized engagements only.',
       'Write portable macOS/BSD + Linux commands. Avoid GNU-only flags such as `grep -P`; prefer `grep -E`, `awk`, `sed`, `perl -ne`, or `jq` for extraction.',
@@ -113,7 +146,9 @@ export class ShellTool implements Tool {
       properties: {
         command: {
           type: 'string',
-          description: 'Shell command to execute. Will run via /bin/sh -c.',
+          description: isWindows()
+            ? 'Shell command to execute. Will run via PowerShell -Command.'
+            : 'Shell command to execute. Will run via /bin/sh -c.',
         },
         timeout_seconds: {
           type: 'integer',
@@ -153,9 +188,13 @@ export class ShellTool implements Tool {
         throw new Error(`command blocked by denylist (matched ${re.source})`);
       }
     }
-    for (const { re, message } of PORTABILITY_PATTERNS) {
-      if (re.test(cmdStr)) {
-        throw new Error(`command blocked for portability: ${message}`);
+    // The portability guards steer the model away from GNU-only Unix flags;
+    // they are irrelevant (and their messages misleading) under PowerShell.
+    if (!isWindows()) {
+      for (const { re, message } of PORTABILITY_PATTERNS) {
+        if (re.test(cmdStr)) {
+          throw new Error(`command blocked for portability: ${message}`);
+        }
       }
     }
 
@@ -165,11 +204,15 @@ export class ShellTool implements Tool {
       timeoutMs = Math.min(timeoutArg * 1000, MAX_TIMEOUT_MS);
     }
 
-    return runWithCapture(this.shellPath, ['-c', cmdStr], timeoutMs, signal);
+    const { cmd, argv } = shellInvocation(this.shellPath, cmdStr);
+    return runWithCapture(cmd, argv, timeoutMs, signal);
   }
 }
 
 export function rewritePortableCommand(command: string): string {
+  // The macOS/BSD portability rewrite targets Unix tools (perl, grep). Under
+  // PowerShell on Windows it would corrupt commands, so pass them through.
+  if (isWindows()) return command;
   return command.replace(
     GREP_P_RE,
     (match, sep: string, lead: string, rawFlags: string, rawPattern: string, rest: string) => {
@@ -238,6 +281,9 @@ export class BashTool extends ShellTool {
   }
 
   override description(): string {
+    if (isWindows()) {
+      return 'Run a command via PowerShell on the local machine (no /bin/bash on Windows; this falls back to the same PowerShell host as the shell tool). Same gating as the shell tool (per-command permission, denylist, output truncation).';
+    }
     return "Run a bash command via /bin/bash -c on the local machine. Same gating as the shell tool (per-command permission, denylist, output truncation). Prefer this over `shell` when you need bash features like [[ ]] tests, process substitution <(...), arrays, or $'...' quoting.";
   }
 }
@@ -266,7 +312,10 @@ function runWithCapture(
     let timedOut = false;
     timer.unref?.();
 
-    const child = spawn(cmd, argv, { detached: true, signal: controller.signal });
+    // detached lets us kill the whole process group via negative PID on POSIX.
+    // On Windows it would spawn a new console window and the group-kill model
+    // differs, so we leave it attached and rely on taskkill /T below.
+    const child = spawn(cmd, argv, { detached: !isWindows(), signal: controller.signal });
     childPid = child.pid ?? 0;
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -330,6 +379,16 @@ function runWithCapture(
 
 function killProcessGroup(pid: number): void {
   if (!pid) return;
+  if (isWindows()) {
+    // No POSIX signals/process groups on Windows; taskkill /T tears down the
+    // PowerShell process and its child command tree.
+    try {
+      spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch {
+      /* best effort */
+    }
+    return;
+  }
   try {
     process.kill(-pid, 'SIGTERM');
   } catch {

@@ -1,8 +1,27 @@
 // Shell denylist + execution tests.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { AlwaysAllow } from '../permission/permission.js';
-import { BashTool, DENY_PATTERNS, ShellTool, rewritePortableCommand } from './shell.js';
+import {
+  BashTool,
+  DENY_PATTERNS,
+  ShellTool,
+  rewritePortableCommand,
+  shellInvocation,
+} from './shell.js';
+
+// Run a callback with process.platform forced to `platform`, then restore it.
+// isWindows() reads process.platform at call time, so this exercises the
+// Windows code paths from a macOS/Linux CI host without spawning anything.
+function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  try {
+    return fn();
+  } finally {
+    if (original) Object.defineProperty(process, 'platform', original);
+  }
+}
 
 describe('shell denylist', () => {
   const cases: Array<{ name: string; cmd: string; shouldBlock: boolean }> = [
@@ -204,5 +223,56 @@ describe('BashTool', () => {
       new AlwaysAllow(),
     );
     expect(out).toContain('bash-ok');
+  });
+});
+
+describe('Windows shell invocation (issue #11)', () => {
+  afterEach(() => {
+    process.env.PFLOW_WINDOWS_SHELL = undefined;
+    // biome-ignore lint/performance/noDelete: restore env to a clean state
+    delete process.env.PFLOW_WINDOWS_SHELL;
+  });
+
+  it('spawns /bin/sh -c on POSIX', () => {
+    const inv = withPlatform('linux', () => shellInvocation('/bin/sh', 'echo hi'));
+    expect(inv).toEqual({ cmd: '/bin/sh', argv: ['-c', 'echo hi'] });
+  });
+
+  it('spawns PowerShell -Command on Windows instead of /bin/sh', () => {
+    const inv = withPlatform('win32', () => shellInvocation('/bin/sh', 'echo hi'));
+    expect(inv.cmd).toBe('powershell.exe');
+    expect(inv.argv).toEqual(['-NoProfile', '-NonInteractive', '-Command', 'echo hi']);
+    // The /bin/sh path that triggered uv_spawn ENOENT must not be the target.
+    expect(inv.cmd).not.toBe('/bin/sh');
+    expect(inv.argv).not.toContain('-c');
+  });
+
+  it('routes BashTool through PowerShell on Windows too (no /bin/bash)', () => {
+    const inv = withPlatform('win32', () => shellInvocation('/bin/bash', 'Get-ChildItem'));
+    expect(inv.cmd).toBe('powershell.exe');
+    expect(inv.cmd).not.toBe('/bin/bash');
+  });
+
+  it('honors PFLOW_WINDOWS_SHELL override on Windows', () => {
+    process.env.PFLOW_WINDOWS_SHELL = 'pwsh.exe';
+    const inv = withPlatform('win32', () => shellInvocation('/bin/sh', 'echo hi'));
+    expect(inv.cmd).toBe('pwsh.exe');
+  });
+
+  it('skips the Unix grep -P → perl rewrite on Windows', () => {
+    const cmd = "type x | grep -P 'a'";
+    expect(withPlatform('win32', () => rewritePortableCommand(cmd))).toBe(cmd);
+    // Sanity: on POSIX the same input *is* rewritten, proving the guard matters.
+    expect(withPlatform('linux', () => rewritePortableCommand(cmd))).toContain('perl -ne');
+  });
+
+  it('surfaces PowerShell-appropriate tool guidance on Windows', () => {
+    const desc = withPlatform('win32', () => new ShellTool().description());
+    expect(desc).toContain('PowerShell');
+    expect(desc).not.toContain('/bin/sh');
+    const schema = withPlatform('win32', () => new ShellTool().schema()) as {
+      properties: { command: { description: string } };
+    };
+    expect(schema.properties.command.description).toContain('PowerShell');
   });
 });
