@@ -17,6 +17,9 @@ dist/
 # Local agent/harness config — never commit (may contain target hosts)
 .claude/
 
+# Marketing/docs site — developed separately, not tracked in this repo
+/web/
+
 # Local agent state & scan output — never commit. Anchored to the repo
 # root so they don't also exclude source dirs like src/findings/.
 /findings/
