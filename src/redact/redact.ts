@@ -2,8 +2,12 @@
 // crosses a trust boundary the user did not intend (the LLM during
 // /compact, the markdown export during /export).
 //
-// Credential redactor: shape-preserving masks for tokens, keys, and
-// secrets. Tests in redact.test.ts pin the pattern set.
+// L6 (AUDIT.md): no generic high-entropy fallback. We are intentionally
+// label/shape-driven rather than "any 40+ char random string" because the
+// latter produces too many false positives on normal pentest data (long
+// IDs, hashes in responses, base64 bodies, etc.). We keep expanding the
+// explicit patterns (see below) as a middle ground. See also the additional
+// long-token pattern added for L6 mitigation.
 
 // Each pattern captures the prefix in group 1 and the secret body in
 // group 2 so the prefix (e.g. "Bearer ", "AKIA") stays intact while the
@@ -48,6 +52,11 @@ const patterns: RegExp[] = [
   // 2-token Authorization pattern above only catches `Digest username=...`,
   // leaving the response/nonce exposed (E25).
   /(\bresponse=)("?[A-Fa-f0-9]{8,}"?)/g,
+  // Conservative high-entropy fallback for L6 (AUDIT.md). Catches long
+  // base64url-ish strings that look like bearer tokens / API keys in common
+  // value positions. Length 32+ to avoid over-redacting short hashes/IDs in
+  // normal responses. Still shape-ish (requires a key-like prefix nearby).
+  /((?:api|auth|token|secret|key|cred)[^\s:=]{0,10}[:=]\s*["']?)([A-Za-z0-9/+=_-]{32,})/gi,
   // GCP service-account JSON: the private_key body is caught by the PEM block
   // below, but private_key_id (a key fingerprint) leaks separately (E25).
   /(["']?private_key_id["']?\s*[:=]\s*["']?)([A-Za-z0-9]{16,})/gi,

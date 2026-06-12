@@ -4,6 +4,10 @@
 //
 // pino under the hood. Default logger is no-op so callers don't need to
 // error-handle setup.
+//
+// L8 (historical, from AUDIT.md): rotation used to happen only at init().
+// Now has throttled mid-run checks (every 100 writes) + generational rename
+// (up to .3) via maybeRotate() + open(). Long sessions stay bounded.
 
 import { existsSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';

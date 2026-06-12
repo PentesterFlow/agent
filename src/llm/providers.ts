@@ -89,6 +89,45 @@ export const DEEPSEEK_MODELS = [
   'deepseek-reasoner',
 ];
 
+// Anthropic Claude (Messages API). Base URL includes the /v1 prefix so the
+// client builds <base>/messages and the model-list probe hits <base>/models,
+// matching the openai-compat convention. Auth is the x-api-key header plus a
+// required anthropic-version header (NOT Bearer).
+export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com/v1';
+// Pinned wire version for the Messages API. Bump deliberately, not silently —
+// new versions can change response shapes.
+export const ANTHROPIC_VERSION = '2023-06-01';
+export const ANTHROPIC_DEFAULT_MODEL = 'claude-opus-4-8';
+// Anthropic requires max_tokens on every request (unlike Gemini's optional
+// maxOutputTokens). When the user hasn't set one, default to a value that
+// leaves room for a substantive answer + tool call while staying under the
+// SDK/HTTP timeout for non-streaming requests.
+export const ANTHROPIC_DEFAULT_MAX_TOKENS = 16000;
+export const ANTHROPIC_MODELS = [
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5',
+  'claude-opus-4-5',
+  'claude-sonnet-4-5',
+];
+export const ANTHROPIC_RECOMMENDED_MODELS = ANTHROPIC_MODELS;
+
+// claude-opus-4-7 / 4-8 (and the Fable/Mythos 5 family) reject the temperature
+// sampling parameter outright (HTTP 400). Older Claude models (Sonnet 4.6,
+// Haiku 4.5, Opus 4.6 and earlier) still accept it. Used to decide whether a
+// configured temperature is safe to send — mirrors kimiLocksTemperature.
+export function anthropicAcceptsTemperature(model: string): boolean {
+  const m = model.toLowerCase();
+  return !(
+    m.includes('opus-4-7') ||
+    m.includes('opus-4-8') ||
+    m.includes('fable-5') ||
+    m.includes('mythos-5')
+  );
+}
+
 export const GEMINI_DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 export const GEMINI_DEFAULT_MODEL = 'models/gemini-3.5-flash';
 

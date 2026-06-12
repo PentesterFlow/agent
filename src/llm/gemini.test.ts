@@ -18,7 +18,12 @@ beforeAll(async () => {
       res.end(JSON.stringify({ models: [] }));
       return;
     }
-    if (req.method !== 'POST' || req.url !== '/v1beta/models/gemini-test:generateContent') {
+    const isStream =
+      req.method === 'POST' &&
+      req.url === '/v1beta/models/gemini-test:streamGenerateContent?alt=sse';
+    const isGenerate =
+      req.method === 'POST' && req.url === '/v1beta/models/gemini-test:generateContent';
+    if (!isStream && !isGenerate) {
       res.writeHead(404);
       res.end();
       return;
@@ -28,6 +33,36 @@ beforeAll(async () => {
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
       lastBody = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+      if (isStream) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        const event = (obj: unknown) => `data: ${JSON.stringify(obj)}\n\n`;
+        // A thought summary, then answer text split across two chunks, then a
+        // function call with a finishReason.
+        res.write(
+          event({ candidates: [{ content: { parts: [{ text: 'pondering', thought: true }] } }] }),
+        );
+        res.write(event({ candidates: [{ content: { parts: [{ text: 'wor' }] } }] }));
+        res.write(event({ candidates: [{ content: { parts: [{ text: 'king' }] } }] }));
+        res.write(
+          event({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: { name: 'http', args: { url: 'https://example.com' } },
+                      thoughtSignature: 'sig-http',
+                    },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          }),
+        );
+        res.end();
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -132,6 +167,36 @@ describe('GeminiClient', () => {
     const c = new GeminiClient(baseURL, 'test-key', 'models/gemini-test');
     await c.chat({ model: 'models/gemini-test', messages: [{ role: 'user', content: 'hi' }] });
     expect(lastBody?.generationConfig).toBeUndefined();
+  });
+
+  it('emits thinkingConfig to disable thinking when budget is 0', async () => {
+    const c = new GeminiClient(baseURL, 'test-key', 'models/gemini-test', { thinkingBudget: 0 });
+    await c.chat({ model: 'models/gemini-test', messages: [{ role: 'user', content: 'hi' }] });
+    expect(lastBody?.generationConfig).toEqual({ thinkingConfig: { thinkingBudget: 0 } });
+  });
+
+  it('caps thinking and requests thought summaries for a positive budget', async () => {
+    const c = new GeminiClient(baseURL, 'test-key', 'models/gemini-test', { thinkingBudget: 256 });
+    await c.chat({ model: 'models/gemini-test', messages: [{ role: 'user', content: 'hi' }] });
+    expect(lastBody?.generationConfig).toEqual({
+      thinkingConfig: { thinkingBudget: 256, includeThoughts: true },
+    });
+  });
+
+  it('streams answer deltas, surfaces thoughts as progress, and parses tool calls', async () => {
+    const c = new GeminiClient(baseURL, 'test-key', 'models/gemini-test');
+    const deltas: string[] = [];
+    const out = await c.chatStream(
+      { model: 'models/gemini-test', messages: [{ role: 'user', content: 'hi' }], stream: true },
+      (d) => deltas.push(d),
+    );
+    // Thought summary is streamed as progress but kept out of the message.
+    expect(deltas).toEqual(['pondering', 'wor', 'king']);
+    expect(out.message.content).toBe('working');
+    expect(out.finishReason).toBe('STOP');
+    expect(out.message.toolCalls?.[0]?.function.name).toBe('http');
+    expect(out.message.toolCalls?.[0]?.function.arguments).toBe('{"url":"https://example.com"}');
+    expect(out.message.toolCalls?.[0]?.provider?.gemini?.thoughtSignature).toBe('sig-http');
   });
 
   it('pings the model list endpoint', async () => {

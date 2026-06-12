@@ -260,6 +260,9 @@ async function main(): Promise<number> {
   if (cfg.backend === 'gemini' && !cfg.api_key) {
     cfg.api_key = process.env.GEMINI_API_KEY || '';
   }
+  if (cfg.backend === 'anthropic' && !cfg.api_key) {
+    cfg.api_key = process.env.ANTHROPIC_API_KEY || '';
+  }
 
   // Browser MCP is opt-in PER SESSION via --browser, and never persisted:
   // a user must pass --browser each time they want it. We build a

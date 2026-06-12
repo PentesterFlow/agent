@@ -1,9 +1,13 @@
 // Fetch the list of available models from an LLM backend. Used by the
 // interactive /provider flow to populate the model picker after the user
-// chooses Ollama / LM Studio / openai-compat / Kimi / Groq / OpenRouter / DeepSeek / Gemini.
+// chooses Ollama / LM Studio / openai-compat / Kimi / Groq / OpenRouter / DeepSeek / Gemini /
+// Anthropic.
 
 import type { Backend } from '../config/config.js';
 import {
+  ANTHROPIC_DEFAULT_BASE_URL,
+  ANTHROPIC_RECOMMENDED_MODELS,
+  ANTHROPIC_VERSION,
   DEEPSEEK_DEFAULT_BASE_URL,
   DEEPSEEK_MODELS,
   GEMINI_DEFAULT_BASE_URL,
@@ -27,6 +31,7 @@ const DEFAULT_BASE_URL: Record<Exclude<Backend, ''>, string> = {
   openrouter: OPENROUTER_DEFAULT_BASE_URL,
   deepseek: DEEPSEEK_DEFAULT_BASE_URL,
   gemini: GEMINI_DEFAULT_BASE_URL,
+  anthropic: ANTHROPIC_DEFAULT_BASE_URL,
 };
 
 /**
@@ -42,6 +47,7 @@ const DEFAULT_BASE_URL: Record<Exclude<Backend, ''>, string> = {
  *   openrouter    → GET <base>/models    → same as openai-compat (Bearer header)
  *   deepseek      → GET <base>/models    → same as openai-compat (Bearer header)
  *   gemini        → GET <base>/models?key=... → { models: [{ name }] }
+ *   anthropic     → GET <base>/models    → { data: [{ id }] } (x-api-key + anthropic-version)
  */
 export async function listModels(
   backend: Backend,
@@ -58,6 +64,11 @@ export async function listModels(
   if (apiKey && b === 'gemini') {
     // Gemini takes the key as a header, not a query param, so it stays out of logs.
     headers['x-goog-api-key'] = apiKey;
+  } else if (b === 'anthropic') {
+    // Anthropic authenticates with x-api-key (not Bearer) and requires a
+    // pinned wire version on every request, including the model list.
+    if (apiKey) headers['x-api-key'] = apiKey;
+    headers['anthropic-version'] = ANTHROPIC_VERSION;
   } else if (apiKey && b !== 'ollama') {
     headers.Authorization = `Bearer ${apiKey}`;
   }
@@ -118,6 +129,11 @@ function parseModels(backend: Exclude<Backend, ''>, body: unknown): string[] {
     return preferOpenRouterModels(ids);
   }
   if (backend === 'deepseek') return preferKnownModels(ids, DEEPSEEK_MODELS);
+  if (backend === 'anthropic') {
+    // Anthropic's /v1/models uses the same { data: [{ id }] } envelope; float
+    // the known recommended ids to the top, keep any newer ones below.
+    return preferKnownModels(ids, ANTHROPIC_RECOMMENDED_MODELS, { appendUnknown: true });
+  }
   return ids;
 }
 

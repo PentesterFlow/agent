@@ -346,6 +346,9 @@ describe('UI slash commands (terminal integration)', () => {
     await tick();
     await submit(mounted.stdin, '/provider');
 
+    // Ollama→LM Studio→Kimi→Groq→Gemini→Claude→OpenRouter: 6 down-presses.
+    mounted.stdin.write('\x1B[B');
+    await tick();
     mounted.stdin.write('\x1B[B');
     await tick();
     mounted.stdin.write('\x1B[B');
@@ -392,6 +395,9 @@ describe('UI slash commands (terminal integration)', () => {
     await tick();
     await submit(mounted.stdin, '/provider');
 
+    // Ollama→LM Studio→Kimi→Groq→Gemini→Claude→OpenRouter→DeepSeek: 7 down-presses.
+    mounted.stdin.write('\x1B[B');
+    await tick();
     mounted.stdin.write('\x1B[B');
     await tick();
     mounted.stdin.write('\x1B[B');

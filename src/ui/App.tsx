@@ -13,6 +13,8 @@ import { findActiveMention, listMentionDir, parseMentionPath } from '../agent/me
 import type { Backend } from '../config/config.js';
 import { listModels } from '../llm/models.js';
 import {
+  ANTHROPIC_DEFAULT_BASE_URL,
+  ANTHROPIC_RECOMMENDED_MODELS,
   DEEPSEEK_DEFAULT_BASE_URL,
   DEEPSEEK_MODELS,
   GEMINI_CHEAP_MODELS,
@@ -1082,6 +1084,38 @@ function handleSlash(
         });
         return true;
       }
+      if (sub === 'intel') {
+        const action = (rest[1] ?? 'stats').toLowerCase();
+        if (action === 'clear') {
+          const which = (rest[2] ?? 'all') as 'project' | 'personal' | 'all';
+          void agent.clearIntelligence(which).then(() =>
+            dispatch({
+              type: 'append',
+              entry: { kind: 'system', text: `intelligence cleared (${which})` },
+            }),
+          );
+          return true;
+        }
+        if (action === 'stats' || action === 'list') {
+          const s = agent.getIntelligenceStats();
+          dispatch({
+            type: 'append',
+            entry: {
+              kind: 'system',
+              text: `Intelligence (learned scenarios) — project: ${s.project} · personal: ${s.personal}\n(auto-capped + pruned to most recent per scope; use /memory intel clear [project|personal|all] to wipe)`,
+            },
+          });
+          return true;
+        }
+        dispatch({
+          type: 'append',
+          entry: {
+            kind: 'error',
+            text: 'usage: /memory intel [stats|clear [project|personal|all]]',
+          },
+        });
+        return true;
+      }
       // Default view: durable curated facts first, then the session checkpoint.
       const facts = agent.listCuratedMemory();
       const curated = facts.length
@@ -1379,6 +1413,8 @@ function backendLabel(backend: Backend): string {
       return 'DeepSeek';
     case 'gemini':
       return 'Gemini';
+    case 'anthropic':
+      return 'Claude';
   }
 }
 
@@ -1612,6 +1648,7 @@ const TIPS: string[] = [
   'read_payloads(skill="<name>") pulls curated wordlists from disk. Skills like ssti / jwt ship pre-canned payload files in their payloads/ directory.',
   "Disabled skills are hidden from the agent's system prompt entirely. Use /skills to flip a skill back on without restarting.",
   '/model list opens an interactive backend model picker; /model <id> validates against the live catalog and suggests the closest match on typo.',
+  '/memory intel stats shows learned background scenarios count; /memory intel clear wipes them (project/personal/all). Intelligence is auto-pruned but grows to the cap on long engagements.',
 ];
 
 function pad(s: string, n: number): string {
@@ -1715,6 +1752,7 @@ function openProviderPicker(
   const labelGemini = `Gemini${cur.backend === 'gemini' ? ' (current)' : ''}`;
   const labelOpenRouter = `OpenRouter${cur.backend === 'openrouter' ? ' (current)' : ''}`;
   const labelDeepSeek = `DeepSeek${cur.backend === 'deepseek' ? ' (current)' : ''}`;
+  const labelClaude = `Claude${cur.backend === 'anthropic' ? ' (current)' : ''}`;
 
   const req: AskRequest = {
     question: {
@@ -1734,6 +1772,10 @@ function openProviderPicker(
         {
           label: labelGemini,
           description: 'remote — Gemini API with native tool calls',
+        },
+        {
+          label: labelClaude,
+          description: 'remote — api.anthropic.com Messages API with native tool calls',
         },
         {
           label: labelOpenRouter,
@@ -1765,7 +1807,9 @@ function openProviderPicker(
                   ? 'openrouter'
                   : picked.startsWith('DeepSeek')
                     ? 'deepseek'
-                    : 'openai-compat';
+                    : picked.startsWith('Claude')
+                      ? 'anthropic'
+                      : 'openai-compat';
       const config = readConfig();
       // For openai-compat we need URL + key already in config.
       if (backend === 'openai-compat' && (!config.baseURL || !config.apiKey)) {
@@ -1937,6 +1981,37 @@ function openProviderPicker(
           });
         return;
       }
+      if (backend === 'anthropic' && (config.backend !== 'anthropic' || !config.apiKey)) {
+        void promptSecret({
+          header: 'Claude API',
+          question: 'Enter Anthropic API key (ANTHROPIC_API_KEY)',
+          placeholder: 'sk-ant-...',
+        })
+          .then((apiKey) => {
+            if (!apiKey) {
+              dispatch({
+                type: 'append',
+                entry: { kind: 'error', text: 'Anthropic API key cannot be empty.' },
+              });
+              return;
+            }
+            void fetchAndPickModel(
+              backend,
+              ANTHROPIC_DEFAULT_BASE_URL,
+              apiKey,
+              dispatch,
+              applyProvider,
+              { successText: (picked) => `provider set to Claude · model ${picked}` },
+            );
+          })
+          .catch(() => {
+            dispatch({
+              type: 'append',
+              entry: { kind: 'system', text: 'Claude setup cancelled.' },
+            });
+          });
+        return;
+      }
       const baseURL =
         backend === 'openai-compat'
           ? config.baseURL
@@ -1960,7 +2035,11 @@ function openProviderPicker(
                     ? config.backend === 'deepseek'
                       ? config.baseURL || DEEPSEEK_DEFAULT_BASE_URL
                       : DEEPSEEK_DEFAULT_BASE_URL
-                    : '';
+                    : backend === 'anthropic'
+                      ? config.backend === 'anthropic'
+                        ? config.baseURL || ANTHROPIC_DEFAULT_BASE_URL
+                        : ANTHROPIC_DEFAULT_BASE_URL
+                      : '';
       const apiKey = backend === 'openai-compat' || config.backend === backend ? config.apiKey : '';
       void fetchAndPickModel(backend, baseURL, apiKey, dispatch, applyProvider);
     },
@@ -2090,5 +2169,6 @@ function modelDescription(
     if (GEMINI_CHEAP_MODELS.includes(model)) parts.push('cheap cost');
     else if (GEMINI_RECOMMENDED_MODELS.includes(model)) parts.push('best fit');
   }
+  if (backend === 'anthropic' && ANTHROPIC_RECOMMENDED_MODELS.includes(model)) parts.push('Claude');
   return parts.length > 0 ? parts.join(' · ') : undefined;
 }

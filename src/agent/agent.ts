@@ -240,6 +240,20 @@ export class Agent {
     };
   }
 
+  /** Clear learned background intelligence (the .pentesterflow/intelligence/scenarios.jsonl files).
+   *  Complements the automatic prune (MAX 5000 most recent per scope).
+   *  This provides user-visible control over the M13 historical growth concern.
+   */
+  async clearIntelligence(scope: 'project' | 'personal' | 'all' = 'all'): Promise<void> {
+    if (this.intelligence) {
+      await this.intelligence.clear(scope);
+    }
+  }
+
+  getIntelligenceStats(): { project: number; personal: number } {
+    return this.intelligence ? this.intelligence.getStats() : { project: 0, personal: 0 };
+  }
+
   formatMemory(): string {
     if (!this.memory || countMemoryItems(this.memory) === 0) {
       return 'session memory is empty — run /compact after useful work accumulates.';

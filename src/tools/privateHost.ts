@@ -4,6 +4,15 @@
 // so the agent can't silently reach internal services or the cloud metadata
 // endpoint. The gate prompts with noSessionCache so each private/internal
 // request needs a fresh, non-cached approval (auto-approved under YOLO).
+//
+// H2 (AUDIT.md): The gate performs a DNS lookup to decide whether to prompt,
+// then passes the *hostname* (not a pinned IP) to undici/fetch. A short-TTL
+// rebinding domain can return a public IP for the gate decision and an
+// internal/metadata IP on the actual connect. This is an accepted design
+// decision (see triage table in AUDIT.md and PROJECT.md "without limits"
+// philosophy). Reaching internal services via rebinding is frequently a
+// legitimate testing goal. We do NOT pin IPs or hard-block. At most we
+// surface the reason in the permission prompt (already done) and tool output.
 
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
@@ -30,15 +39,20 @@ export function parseHTTPURL(raw: string): URL {
  * prompt fires on every such request and is never silently re-granted for the
  * session (auto-approved under YOLO, like every gate). `toolName` is the tool
  * surfacing the request (for the modal). Throws on deny.
+ *
+ * Returns the reason string (if any) so callers can surface a non-blocking
+ * trace in tool output / transcript. This is the recommended "at most a notice"
+ * mitigation for H2 (DNS rebinding) per AUDIT.md — we still allow the request
+ * after explicit approval and never pin or block.
  */
 export async function gatePrivateRequest(
   p: Prompter,
   parsed: URL,
   signal: AbortSignal,
   toolName: string,
-): Promise<void> {
+): Promise<string> {
   const reason = await privateHostReason(parsed.hostname);
-  if (!reason) return;
+  if (!reason) return '';
   const decision = await p.ask(
     {
       tool: toolName,
@@ -51,6 +65,7 @@ export async function gatePrivateRequest(
   if (decision === 'deny') {
     throw new Error(`request to private/internal URL denied: ${parsed.href}`);
   }
+  return reason;
 }
 
 /** Returns a human-readable reason if the host is private/internal, else ''.

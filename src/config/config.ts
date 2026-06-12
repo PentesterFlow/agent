@@ -20,6 +20,7 @@ const Backend = z.enum([
   'openrouter',
   'deepseek',
   'gemini',
+  'anthropic',
 ]);
 export type Backend = z.infer<typeof Backend>;
 
@@ -86,6 +87,12 @@ const ConfigSchema = z.object({
   // KIMI_DEFAULT_MAX_TOKENS so it can't narrate unbounded). Bounds latency
   // and runaway generations; raise it if long final answers get truncated.
   max_tokens: z.number().int().positive().optional(),
+  // Gemini-only: cap the model's internal "thinking" budget (in tokens). Gemini
+  // 2.5/3 Flash models think on every turn by default, which dominates latency
+  // across an agent loop. 0 disables thinking entirely (fastest); a positive
+  // value caps it. Unset → leave the API default (no thinkingConfig sent, so
+  // models without the knob aren't affected).
+  gemini_thinking_budget: z.number().int().nonnegative().optional(),
   // Tooling profile: which tools the agent reaches for by default.
   //   'minimal' — curl + Unix only (jq, grep, awk, sed, head, sort, uniq).
   //   'full'    — adds ffuf, nuclei, sqlmap, gobuster, subfinder, httpx,

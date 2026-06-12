@@ -1,0 +1,38 @@
+{
+  "CallerReference": "pentesterflow-2026-06-10-01",
+  "Comment": "PentesterFlow static site",
+  "Enabled": true,
+  "DefaultRootObject": "index.html",
+  "PriceClass": "PriceClass_100",
+  "HttpVersion": "http2and3",
+  "Origins": {
+    "Quantity": 1,
+    "Items": [
+      {
+        "Id": "s3origin",
+        "DomainName": "pentesterflow-web-111315604409.s3.us-east-1.amazonaws.com",
+        "OriginAccessControlId": "E1VT20CP8NEZ5U",
+        "S3OriginConfig": { "OriginAccessIdentity": "" }
+      }
+    ]
+  },
+  "DefaultCacheBehavior": {
+    "TargetOriginId": "s3origin",
+    "ViewerProtocolPolicy": "redirect-to-https",
+    "Compress": true,
+    "AllowedMethods": {
+      "Quantity": 2,
+      "Items": ["GET", "HEAD"],
+      "CachedMethods": { "Quantity": 2, "Items": ["GET", "HEAD"] }
+    },
+    "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6"
+  },
+  "CustomErrorResponses": {
+    "Quantity": 2,
+    "Items": [
+      { "ErrorCode": 403, "ResponseCode": "200", "ResponsePagePath": "/index.html", "ErrorCachingMinTTL": 10 },
+      { "ErrorCode": 404, "ResponseCode": "200", "ResponsePagePath": "/index.html", "ErrorCachingMinTTL": 10 }
+    ]
+  },
+  "ViewerCertificate": { "CloudFrontDefaultCertificate": true }
+}

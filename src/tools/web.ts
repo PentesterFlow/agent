@@ -101,7 +101,7 @@ export class WebFetchTool implements Tool {
     const url = argString(args, 'url');
     if (!url) throw new Error('url is required');
     const parsed = parseHTTPURL(url);
-    await gatePrivateRequest(p, parsed, signal, 'web_fetch');
+    const privateReason = await gatePrivateRequest(p, parsed, signal, 'web_fetch');
 
     // Cache-check after the private-host gate so a repeat private fetch still
     // re-prompts rather than silently replaying a cached body.
@@ -133,7 +133,10 @@ export class WebFetchTool implements Tool {
     if (text.length > FETCH_TEXT_CAP) {
       text = `${text.slice(0, FETCH_TEXT_CAP)}\n[... truncated ...]`;
     }
-    const result = `URL: ${url}\nStatus: ${resp.status} ${resp.statusText}\n\n${text}`;
+    let result = `URL: ${url}\nStatus: ${resp.status} ${resp.statusText}\n\n${text}`;
+    if (privateReason) {
+      result = `note: private/internal host approved for this fetch (reason: ${privateReason})\n\n${result}`;
+    }
     cacheSet(cacheKey, result);
     return result;
   }

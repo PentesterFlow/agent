@@ -2,6 +2,19 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AgentEvent } from '../agent/events.js';
+import { apply as redact } from '../redact/index.js';
+
+/**
+ * Opt-in full session debug logger (enabled via --debug-session).
+ *
+ * L9 (from AUDIT.md): previously wrote completely unredacted tool I/O.
+ * We now run the standard redactor over the JSONL payload by default.
+ * This is a safe improvement: the operator still gets rich event structure
+ * for debugging the agent itself, while their own credentials and target
+ * secrets are masked the same way they are for /compact and intelligence.
+ * Full raw output can still be obtained by other means if truly needed for
+ * a specific investigation (the file is local + 0600).
+ */
 
 export interface SessionDebugLog {
   readonly enabled: boolean;
@@ -34,7 +47,13 @@ export function createSessionDebugLog(opts: SessionDebugOptions): SessionDebugLo
     };
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      appendFileSync(path, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
+      // Apply redaction to the serialized payload before writing (L9 improvement).
+      // Debug logs remain useful for structure and events while protecting
+      // the operator's own secrets (tokens, keys, etc.) by default.
+      // This makes the opt-in debug path consistent with compaction/snapshots/learning.
+      const line = JSON.stringify(payload);
+      const safe = redact(line);
+      appendFileSync(path, `${safe}\n`, { mode: 0o600 });
     } catch {
       // Debug logging must never break normal agent usage.
     }

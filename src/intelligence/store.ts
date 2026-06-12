@@ -245,6 +245,34 @@ export class IntelligenceStore {
     }
   }
 
+  /**
+   * Clear learned intelligence (the background scenarios.jsonl files).
+   * This addresses the historical unbounded growth concern (M13 in AUDIT.md)
+   * beyond the automatic pruneIfTooLong (capped at 5000 most-recent).
+   * Safe to call; best-effort on errors.
+   */
+  async clear(scope: 'project' | 'personal' | 'all' = 'all'): Promise<void> {
+    const targets: ('project' | 'personal')[] = scope === 'all' ? ['project', 'personal'] : [scope];
+    for (const t of targets) {
+      const p = t === 'project' ? this.projectPath : this.personalPath;
+      try {
+        if (existsSync(p)) {
+          writeFileSync(p, '', { mode: 0o600 });
+        }
+        this.invalidate(p);
+      } catch {
+        // best effort
+      }
+    }
+  }
+
+  /** Return approximate counts for the two scopes (useful for /memory style UX). */
+  getStats(): { project: number; personal: number } {
+    const proj = this.readScenarios(this.projectPath, 'project').length;
+    const pers = this.readScenarios(this.personalPath, 'personal').length;
+    return { project: proj, personal: pers };
+  }
+
   async learnFromText(text: string, sourceSessionId?: string): Promise<IntelligenceScenario[]> {
     const cleaned = redact(text);
     const candidates = extractScenarios(cleaned, sourceSessionId);

@@ -1,11 +1,14 @@
 // Build the right Client from the parsed Config.
 
 import type { Config } from '../config/config.js';
+import { AnthropicClient } from './anthropic.js';
 import type { Client } from './client.js';
 import { GeminiClient } from './gemini.js';
 import { OllamaClient } from './ollama.js';
 import { OpenAIClient } from './openai.js';
 import {
+  ANTHROPIC_DEFAULT_BASE_URL,
+  ANTHROPIC_DEFAULT_MODEL,
   DEEPSEEK_DEFAULT_BASE_URL,
   DEEPSEEK_DEFAULT_MODEL,
   GEMINI_DEFAULT_BASE_URL,
@@ -98,6 +101,18 @@ export function newFromConfig(cfg: Config): Client {
         cfg.base_url || GEMINI_DEFAULT_BASE_URL,
         cfg.api_key,
         cfg.model || GEMINI_DEFAULT_MODEL,
+        // Forward the optional thinking budget so the user can cap/disable
+        // Gemini's internal thinking pass — its main latency driver.
+        { ...gen, thinkingBudget: cfg.gemini_thinking_budget },
+      );
+    case 'anthropic':
+      if (!cfg.api_key) {
+        throw new Error('anthropic backend requires api_key or ANTHROPIC_API_KEY');
+      }
+      return new AnthropicClient(
+        cfg.base_url || ANTHROPIC_DEFAULT_BASE_URL,
+        cfg.api_key,
+        cfg.model || ANTHROPIC_DEFAULT_MODEL,
         gen,
       );
     default: {

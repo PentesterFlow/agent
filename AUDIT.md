@@ -14,6 +14,27 @@ Severity legend: **HIGH** = security bypass / RCE primitive / crash / silent dat
 
 ---
 
+## 2026-06-11 Follow-up (after "fix them all" pass)
+
+All previously fixable HIGH/MED/LOW items from the 2026-06-10 snapshot have been addressed in source (confirmed by re-review + 654 tests green).
+
+**Remaining accepted (intentional, not changed):**
+- H2 (DNS rebinding) — kept permissive + added non-blocking "note: private/internal host approved..." trace in http + web_fetch tool results for visibility without blocking capability.
+- L6 (redaction high-entropy) — inherent limitation; added one extra conservative long-token pattern + docs.
+- L9 (debug logs) — improved: sessionDebug now applies the standard redactor by default (structure preserved, secrets masked). Still opt-in + local.
+
+**Low items addressed in this pass:**
+- L8 (logger rotation) — was already fixed in tree (mid-run throttled + generational); added explicit comment.
+- Help text nits (L15) — already correct in current KEYBINDINGS (Ctrl-N/J, Ctrl-A/E, Ctrl-F documented).
+- Intelligence growth (M13) — already had 5000 cap + prune; added `clearIntelligence` + `/memory intel stats|clear` UX + agent methods + help tip.
+- Added prominent AUDIT cross-reference comments in privateHost.ts, redact.ts, sessionDebug.ts, logger.ts.
+
+No new defects introduced. All changes preserve the "power for authorized operators, prompts not hard blocks" model.
+
+See also the concise list in the review session output and the new `/memory intel` command.
+
+---
+
 ## Remediation status (verified against source)
 
 > Updated 2026-06-10. Each finding below was re-checked against the current tree; fixes carry an

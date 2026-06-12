@@ -105,7 +105,7 @@ export class HTTPTool implements Tool {
     const resolved = this.resolveURL(rawURL);
     // SSRF guard: a request whose host is (or resolves to) a private/internal
     // address requires an explicit, non-cached approval — even in YOLO.
-    await gatePrivateRequest(p, parseHTTPURL(resolved), signal, 'http');
+    const privateReason = await gatePrivateRequest(p, parseHTTPURL(resolved), signal, 'http');
 
     const headers = new Headers();
     const hdrsArg = args.headers;
@@ -139,6 +139,10 @@ export class HTTPTool implements Tool {
     }
     out += '\n';
     out += new TextDecoder().decode(raw);
+
+    if (privateReason) {
+      out = `note: private/internal host approved for this request (reason: ${privateReason})\n\n${out}`;
+    }
     return out;
   }
 
