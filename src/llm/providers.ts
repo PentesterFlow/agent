@@ -1,6 +1,7 @@
 export const KIMI_DEFAULT_BASE_URL = 'https://api.moonshot.ai/v1';
 export const KIMI_DEFAULT_MODEL = 'kimi-k2.6';
 export const KIMI_MODELS = [
+  'kimi-k2.7-code',
   'kimi-k2.6',
   'kimi-k2.5',
   'moonshot-v1-auto',
@@ -13,10 +14,12 @@ export const KIMI_MODELS = [
 ];
 
 // Context windows (tokens) for hosted Kimi/Moonshot models, from
-// GET https://api.moonshot.ai/v1/models. kimi-k2.6 / k2.5 are 256K — far
-// larger than the generic 16K auto-compact default — so we size the
-// compaction threshold off the real window instead of throttling the model.
+// GET https://api.moonshot.ai/v1/models. kimi-k2.7-code / k2.6 / k2.5 are
+// 256K — far larger than the generic 16K auto-compact default — so we size
+// the compaction threshold off the real window instead of throttling the
+// model.
 export const KIMI_CONTEXT_WINDOWS: Record<string, number> = {
+  'kimi-k2.7-code': 262144,
   'kimi-k2.6': 262144,
   'kimi-k2.5': 262144,
   'moonshot-v1-auto': 131072,
@@ -28,14 +31,18 @@ export const KIMI_CONTEXT_WINDOWS: Record<string, number> = {
   'moonshot-v1-8k-vision-preview': 8192,
 };
 
-// kimi-k2.6 / k2.5 reject any `temperature` other than 1 — the API returns
-// `400 invalid temperature: only 1 is allowed for this model`. The other
+// kimi-k2.7-code / k2.6 / k2.5 reject any `temperature` other than 1 — the
+// API returns `400 invalid temperature: only 1 is allowed for this model`
+// (k2.7-code fixes temperature/top_p/penalties server-side). The other
 // moonshot-v1-* models accept a normal range. Used to decide whether it's
 // safe to send a configured temperature.
 export function kimiLocksTemperature(model: string): boolean {
-  return model === 'kimi-k2.6' || model === 'kimi-k2.5';
+  return model === 'kimi-k2.7-code' || model === 'kimi-k2.6' || model === 'kimi-k2.5';
 }
 
+// kimi-k2.6 / k2.5 expose a thinking/non-thinking switch we can toggle.
+// kimi-k2.7-code is deliberately excluded: thinking is mandatory and always
+// on (disabling it returns an API error), so there is nothing to toggle.
 export function kimiSupportsThinkingToggle(model: string): boolean {
   return model === 'kimi-k2.6' || model === 'kimi-k2.5';
 }
@@ -133,6 +140,7 @@ export const GEMINI_DEFAULT_MODEL = 'models/gemini-3.5-flash';
 
 export const GEMINI_BEST_FIT_MODELS = [
   'models/gemini-3.5-flash',
+  'models/gemini-3.1-pro-preview',
   'models/gemini-flash-latest',
   'models/gemini-3-flash-preview',
   'models/gemini-3.1-flash-lite',

@@ -272,7 +272,7 @@ applies per-provider defaults, and enforces required fields (API keys, base URLs
 | `ollama` (config value `''`) | `http://localhost:11434` | user | ND-JSON chat, `/api/tags` ping |
 | `lmstudio` | `http://localhost:1234/v1` | user | OpenAI client, empty key, stop tokens |
 | `openai-compat` | (required) | user | generic OpenAI |
-| `kimi` | `https://api.moonshot.ai/v1` | `kimi-k2.6` | temp-locked, `max_completion_tokens`, thinking toggle |
+| `kimi` | `https://api.moonshot.ai/v1` | `kimi-k2.6` | temp-locked (k2.7-code/k2.6/k2.5), `max_completion_tokens`, thinking toggle (k2.7-code thinks always-on) |
 | `groq` | `https://api.groq.com/openai/v1` | `openai/gpt-oss-20b` | compact prompt, low compaction threshold |
 | `openrouter` | `https://openrouter.ai/api/v1` | `openrouter/auto` | extra `HTTP-Referer`/title headers |
 | `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash` | |
@@ -296,7 +296,7 @@ applies per-provider defaults, and enforces required fields (API keys, base URLs
 
 - **`models.ts`** — `listModels` per-backend (`/api/tags`, `/models`, Gemini `/models?key`),
   with recommended-first ordering.
-- **`providers.ts`** — Kimi/Moonshot context windows (k2.6/k2.5 = 256K), temperature-lock and
+- **`providers.ts`** — Kimi/Moonshot context windows (k2.7-code/k2.6/k2.5 = 256K), temperature-lock and
   thinking-toggle detection, `kimiAutoCompactThreshold` (75% of window), known model lists.
 - **`modelWarnings.ts`** — warns when local models are < 14b or hosted models < 70b (unreliable
   tool calls).

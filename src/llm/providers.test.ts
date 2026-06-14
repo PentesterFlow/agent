@@ -9,7 +9,8 @@ import {
 } from './providers.js';
 
 describe('kimiLocksTemperature', () => {
-  it('flags k2.6 / k2.5 (provider rejects temperature != 1)', () => {
+  it('flags k2.7-code / k2.6 / k2.5 (provider rejects temperature != 1)', () => {
+    expect(kimiLocksTemperature('kimi-k2.7-code')).toBe(true);
     expect(kimiLocksTemperature('kimi-k2.6')).toBe(true);
     expect(kimiLocksTemperature('kimi-k2.5')).toBe(true);
   });
@@ -24,6 +25,8 @@ describe('kimiSupportsThinkingToggle', () => {
   it('only enables the thinking toggle for Kimi K2.6 / K2.5', () => {
     expect(kimiSupportsThinkingToggle('kimi-k2.6')).toBe(true);
     expect(kimiSupportsThinkingToggle('kimi-k2.5')).toBe(true);
+    // k2.7-code always thinks (mandatory) — no toggle to expose.
+    expect(kimiSupportsThinkingToggle('kimi-k2.7-code')).toBe(false);
     expect(kimiSupportsThinkingToggle('moonshot-v1-8k')).toBe(false);
     expect(kimiSupportsThinkingToggle('moonshot-v1-128k')).toBe(false);
   });
