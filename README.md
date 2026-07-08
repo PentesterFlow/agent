@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/pentesterflow-agent-badge.png)](https://mseep.ai/app/pentesterflow-agent)
+
 <div align="center">
 
 <img src="assets/logo.png" alt="PentesterFlow" width="520" />
