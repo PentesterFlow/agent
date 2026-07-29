@@ -104,6 +104,12 @@ function privateIPv4Reason(host: string): string {
   if (a === 169 && b === 254) return 'link-local/metadata IPv4';
   if (a === 172 && b >= 16 && b <= 31) return 'RFC1918 private IPv4';
   if (a === 192 && b === 168) return 'RFC1918 private IPv4';
+  // RFC 6598 shared address space (100.64.0.0/10). Not publicly routable, and in
+  // practice this is where real internal infrastructure lives: Tailscale/WireGuard
+  // overlays (incl. the 100.100.100.100 MagicDNS resolver), carrier-grade NAT, and
+  // several cloud providers' internal service endpoints. Without this a web_fetch
+  // at a tailnet host is reached silently, with no gate prompt.
+  if (a === 100 && b !== undefined && b >= 64 && b <= 127) return 'RFC6598 shared address space IPv4';
   if (a === 0) return 'this-network IPv4';
   return '';
 }
