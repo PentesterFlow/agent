@@ -6,6 +6,7 @@
 // position; we accumulate them per-index and assign a fallback ID if the
 // server omits one.
 
+import { traceModelRequest } from '../telemetry/agentpond.js';
 import type { Client, Pinger, StreamingClient } from './client.js';
 import { type BackendError, classifyBackend, parseRetryAfter } from './errors.js';
 import { newCallID } from './ids.js';
@@ -150,7 +151,16 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
     // Retry rate limits / transient 5xx with backoff (E7). The non-streaming
     // call has no observable side effects before it returns, so it's safe to
     // re-run wholesale.
-    return withRetry(() => this.chatOnce(req, signal), { signal });
+    return traceModelRequest(
+      {
+        messageCount: req.messages.length,
+        model: this.modelID,
+        provider: this.label,
+        streaming: false,
+        toolCount: req.tools?.length ?? 0,
+      },
+      () => withRetry(() => this.chatOnce(req, signal), { signal }),
+    );
   }
 
   private async chatOnce(req: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
@@ -216,6 +226,23 @@ export class OpenAIClient implements Client, StreamingClient, Pinger {
   }
 
   async chatStream(
+    req: ChatRequest,
+    onDelta: (delta: string) => void,
+    signal?: AbortSignal,
+  ): Promise<ChatResponse> {
+    return traceModelRequest(
+      {
+        messageCount: req.messages.length,
+        model: this.modelID,
+        provider: this.label,
+        streaming: true,
+        toolCount: req.tools?.length ?? 0,
+      },
+      () => this.chatStreamOnce(req, onDelta, signal),
+    );
+  }
+
+  private async chatStreamOnce(
     req: ChatRequest,
     onDelta: (delta: string) => void,
     signal?: AbortSignal,

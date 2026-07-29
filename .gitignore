@@ -25,4 +25,5 @@ dist/
 /findings/
 /recon/
 /.pentesterflow/
+/.agentpond/
 bughunter-report-*.md

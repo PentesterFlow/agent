@@ -479,6 +479,27 @@ Reports include:
 | `~/.pentesterflow/logs/pentesterflow.log` | Structured JSON-lines logs. |
 | `~/.pentesterflow/debug/session-*.jsonl` | Opt-in full session debug logs. |
 
+### Optional AgentPond traces
+
+OpenAI-compatible provider calls can be traced to storage you control. Tracing
+is off unless `AGENTPOND_ENABLED=true`; the spans contain only the provider,
+model, streaming flag, message/tool counts, finish reason, and output sizes.
+Prompts, responses, target data, and credentials are not recorded.
+
+For a local filesystem store:
+
+```sh
+npx agentpond env init local --provider fs \
+  --root "$PWD/.agentpond/envs/local/objects"
+npx agentpond env use local
+eval "$(npx agentpond env get local)"
+AGENTPOND_ENABLED=true npm run dev
+```
+
+After an AI request, run `npx agentpond sync` and
+`npx agentpond traces list` to inspect the trace. Configure another Files SDK
+provider for persistent or shared storage.
+
 Enable complete debug logs when reproducing usage issues:
 
 ```sh
