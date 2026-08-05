@@ -705,6 +705,7 @@ async function main(): Promise<number> {
           baseURL: cfg.base_url,
           apiKey: cfg.api_key,
           model: cfg.model,
+          customProviders: cfg.custom_providers,
         }),
         persistDisabledSkills: async (names: string[]) => {
           cfg.disabled_skills = [...names].sort();
@@ -715,6 +716,9 @@ async function main(): Promise<number> {
           cfg.model = change.model;
           if (change.baseURL !== undefined) cfg.base_url = change.baseURL;
           if (change.apiKey !== undefined) cfg.api_key = change.apiKey;
+          if (change.customProvider) {
+            cfg.custom_providers.push(change.customProvider);
+          }
           const next = llmFactory.newFromConfig(cfg);
           agent.setClient(next);
           agent.setAutoCompactThreshold(effectiveAutoCompactThreshold(cfg));

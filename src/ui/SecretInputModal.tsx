@@ -5,6 +5,8 @@ export interface SecretInputRequest {
   header: string;
   question: string;
   placeholder?: string;
+  masked?: boolean;
+  defaultValue?: string;
   resolve: (value: string) => void;
   reject: (err: Error) => void;
 }
@@ -12,13 +14,16 @@ export interface SecretInputRequest {
 export function SecretInputModal({ req }: { req: SecretInputRequest }): React.ReactElement {
   const [value, setValue] = useState('');
 
+  const isMasked = req.masked !== false;
+
   useInput((input, key) => {
     if (key.escape) {
       req.reject(new Error('cancelled'));
       return;
     }
     if (key.return) {
-      req.resolve(value.trim());
+      const final = value.trim() || req.defaultValue || '';
+      req.resolve(final);
       return;
     }
     if (key.backspace || key.delete) {
@@ -30,7 +35,7 @@ export function SecretInputModal({ req }: { req: SecretInputRequest }): React.Re
     }
   });
 
-  const masked = maskSecret(value);
+  const display = isMasked ? maskSecret(value) : value;
   return (
     <Box
       borderStyle="round"
@@ -47,10 +52,14 @@ export function SecretInputModal({ req }: { req: SecretInputRequest }): React.Re
         {req.question}
       </Text>
       <Box marginTop={1}>
-        <Text color={value ? 'white' : 'gray'}>{value ? masked : req.placeholder || ''}</Text>
+        <Text color={value ? 'white' : 'gray'}>
+          {value ? display : req.defaultValue || req.placeholder || ''}
+        </Text>
       </Box>
       <Box marginTop={1}>
-        <Text color="gray">type key · Enter test · Esc cancel</Text>
+        <Text color="gray">
+          {req.defaultValue ? 'Enter accept default · Esc cancel' : 'type key · Enter test · Esc cancel'}
+        </Text>
       </Box>
     </Box>
   );

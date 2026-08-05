@@ -63,6 +63,7 @@ export interface ProviderChange {
   model: string;
   baseURL?: string;
   apiKey?: string;
+  customProvider?: { name: string; base_url: string; api_key: string };
 }
 export type ApplyProvider = (change: ProviderChange) => Promise<void>;
 /** Persist a disabled-skills list change (writes ~/.pentesterflow/config.json). */
@@ -88,7 +89,7 @@ export interface AppProps {
   bindAskPublisher?: (publish: (req: import('./askBridge.js').AskRequest | null) => void) => void;
   yoloInitial?: boolean;
   /** Read the live config so /provider picker knows current backend / URL / key. */
-  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string };
+  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string; customProviders: Array<{ name: string; base_url: string; api_key: string }> };
   /** Mutate config + swap agent client + persist. Used by /provider and /model. */
   applyProvider: ApplyProvider;
   /** Flip live YOLO gating on the prompter. Wired by the CLI to
@@ -958,7 +959,7 @@ function handleSlash(
   clearScreen: () => void,
   yolo: boolean,
   applyYolo: (on: boolean) => void,
-  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string },
+  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string; customProviders: Array<{ name: string; base_url: string; api_key: string }> },
   applyProvider: ApplyProvider,
   promptSecret: (req: Omit<SecretInputRequest, 'resolve' | 'reject'>) => Promise<string>,
   persistDisabledSkills: PersistDisabledSkills | undefined,
@@ -1657,7 +1658,7 @@ function pad(s: string, n: number): string {
 
 function buildHelpText(
   agent: Agent,
-  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string },
+  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string; customProviders: Array<{ name: string; base_url: string; api_key: string }> },
 ): string {
   const c = helpChalk;
   const cfg = readConfig();
@@ -1739,309 +1740,184 @@ function buildHelpText(
  *  arrow-key + Enter handling works without modification. */
 function openProviderPicker(
   dispatch: React.Dispatch<Action>,
-  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string },
+  readConfig: () => { backend: Backend; baseURL: string; apiKey: string; model: string; customProviders: Array<{ name: string; base_url: string; api_key: string }> },
   applyProvider: ApplyProvider,
   promptSecret: (req: Omit<SecretInputRequest, 'resolve' | 'reject'>) => Promise<string>,
 ): void {
   const cur = readConfig();
-  const labelOllama = `Ollama${cur.backend === 'ollama' || cur.backend === '' ? ' (current)' : ''}`;
-  const labelLM = `LM Studio${cur.backend === 'lmstudio' ? ' (current)' : ''}`;
-  const labelOAI = `OpenAI-compatible${cur.backend === 'openai-compat' ? ' (current)' : ''}`;
-  const labelKimi = `Kimi${cur.backend === 'kimi' ? ' (current)' : ''}`;
-  const labelGroq = `Groq${cur.backend === 'groq' ? ' (current)' : ''}`;
-  const labelGemini = `Gemini${cur.backend === 'gemini' ? ' (current)' : ''}`;
-  const labelOpenRouter = `OpenRouter${cur.backend === 'openrouter' ? ' (current)' : ''}`;
-  const labelDeepSeek = `DeepSeek${cur.backend === 'deepseek' ? ' (current)' : ''}`;
-  const labelClaude = `Claude${cur.backend === 'anthropic' ? ' (current)' : ''}`;
+  const isCurrent = (b: Backend) => cur.backend === b;
+  const isCurrentCustom = (name: string) =>
+    cur.backend === 'openai-compat' && cur.baseURL && cur.customProviders.some(
+      (p) => p.name === name && p.base_url === cur.baseURL,
+    );
+
+  const options: Array<{ label: string; description: string }> = [
+    { label: `Ollama${isCurrent('ollama') || cur.backend === '' ? ' (current)' : ''}`, description: 'local — /api/tags + /api/chat' },
+    { label: `LM Studio${isCurrent('lmstudio') ? ' (current)' : ''}`, description: 'local — /v1/models + /v1/chat/completions' },
+    { label: `Kimi${isCurrent('kimi') ? ' (current)' : ''}`, description: 'remote — api.moonshot.ai OpenAI-compatible API' },
+    { label: `Groq${isCurrent('groq') ? ' (current)' : ''}`, description: 'remote — api.groq.com OpenAI-compatible Chat API' },
+    { label: `Gemini${isCurrent('gemini') ? ' (current)' : ''}`, description: 'remote — Gemini API with native tool calls' },
+    { label: `Claude${isCurrent('anthropic') ? ' (current)' : ''}`, description: 'remote — api.anthropic.com Messages API with native tool calls' },
+    { label: `OpenRouter${isCurrent('openrouter') ? ' (current)' : ''}`, description: 'remote — openrouter.ai OpenAI-compatible API' },
+    { label: `DeepSeek${isCurrent('deepseek') ? ' (current)' : ''}`, description: 'remote — api.deepseek.com OpenAI-compatible API' },
+    { label: `OpenAI-compatible${isCurrent('openai-compat') && !cur.customProviders.some((p) => p.base_url === cur.baseURL) ? ' (current)' : ''}`, description: 'remote — OpenAI-compatible API (URL + key)' },
+  ];
+
+  for (const p of cur.customProviders) {
+    options.push({
+      label: `${p.name}${isCurrentCustom(p.name) ? ' (current)' : ''}`,
+      description: `${p.base_url}`,
+    });
+  }
+
+  options.push({ label: '+ Add custom provider...', description: 'save a named OpenAI-compatible endpoint' });
+
+  const customNames = cur.customProviders.map((p) => p.name);
 
   const req: AskRequest = {
     question: {
       header: 'provider',
       question: 'Which LLM backend should pentesterflow use?',
-      options: [
-        { label: labelOllama, description: 'local — /api/tags + /api/chat' },
-        { label: labelLM, description: 'local — /v1/models + /v1/chat/completions' },
-        {
-          label: labelKimi,
-          description: 'remote — api.moonshot.ai OpenAI-compatible API',
-        },
-        {
-          label: labelGroq,
-          description: 'remote — api.groq.com OpenAI-compatible Chat API',
-        },
-        {
-          label: labelGemini,
-          description: 'remote — Gemini API with native tool calls',
-        },
-        {
-          label: labelClaude,
-          description: 'remote — api.anthropic.com Messages API with native tool calls',
-        },
-        {
-          label: labelOpenRouter,
-          description: 'remote — openrouter.ai OpenAI-compatible API',
-        },
-        {
-          label: labelDeepSeek,
-          description: 'remote — api.deepseek.com OpenAI-compatible API',
-        },
-        {
-          label: labelOAI,
-          description: 'remote — needs base URL + API key (uses current config values)',
-        },
-      ],
+      options,
     },
     resolve: (picked) => {
       dispatch({ type: 'set-ask', req: null });
-      const backend: Backend = picked.startsWith('Ollama')
-        ? 'ollama'
-        : picked.startsWith('LM Studio')
-          ? 'lmstudio'
-          : picked.startsWith('Kimi')
-            ? 'kimi'
-            : picked.startsWith('Groq')
-              ? 'groq'
-              : picked.startsWith('Gemini')
-                ? 'gemini'
-                : picked.startsWith('OpenRouter')
-                  ? 'openrouter'
-                  : picked.startsWith('DeepSeek')
-                    ? 'deepseek'
-                    : picked.startsWith('Claude')
-                      ? 'anthropic'
-                      : 'openai-compat';
       const config = readConfig();
-      // For openai-compat we need URL + key already in config.
-      if (backend === 'openai-compat' && (!config.baseURL || !config.apiKey)) {
-        dispatch({
-          type: 'append',
-          entry: {
-            kind: 'error',
-            text:
-              'openai-compat needs a base URL + API key. Restart with --base-url + --api-key, ' +
-              'or pre-set them in ~/.pentesterflow/config.json, then run /provider again.',
-          },
+
+      if (picked.startsWith('Ollama')) {
+        void fetchAndPickModel('ollama', config.baseURL || 'http://localhost:11434', '', dispatch, applyProvider);
+        return;
+      }
+      if (picked.startsWith('LM Studio')) {
+        void fetchAndPickModel('lmstudio', config.baseURL || 'http://localhost:1234/v1', '', dispatch, applyProvider);
+        return;
+      }
+      if (picked.startsWith('Kimi')) {
+        if (config.backend !== 'kimi' || !config.apiKey) {
+          void promptSecret({ header: 'Kimi API', question: 'Enter Kimi API key (MOONSHOT_API_KEY)', placeholder: 'sk-...' })
+            .then((apiKey) => {
+              if (!apiKey) { dispatch({ type: 'append', entry: { kind: 'error', text: 'Kimi API key cannot be empty.' } }); return; }
+              void fetchAndPickModel('kimi', config.backend === 'kimi' ? config.baseURL || KIMI_DEFAULT_BASE_URL : KIMI_DEFAULT_BASE_URL, apiKey, dispatch, applyProvider, { successText: (m) => `provider set to Kimi · model ${m}` });
+            })
+            .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'Kimi setup cancelled.' } }); });
+          return;
+        }
+        void fetchAndPickModel('kimi', config.baseURL || KIMI_DEFAULT_BASE_URL, config.apiKey, dispatch, applyProvider);
+        return;
+      }
+      if (picked.startsWith('Groq')) {
+        if (config.backend !== 'groq' || !config.apiKey) {
+          void promptSecret({ header: 'Groq API', question: 'Enter Groq API key (GROQ_API_KEY)', placeholder: 'gsk_...' })
+            .then((apiKey) => {
+              if (!apiKey) { dispatch({ type: 'append', entry: { kind: 'error', text: 'Groq API key cannot be empty.' } }); return; }
+              void fetchAndPickModel('groq', GROQ_DEFAULT_BASE_URL, apiKey, dispatch, applyProvider, { successText: (m) => `provider set to Groq · model ${m}` });
+            })
+            .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'Groq setup cancelled.' } }); });
+          return;
+        }
+        void fetchAndPickModel('groq', GROQ_DEFAULT_BASE_URL, config.apiKey, dispatch, applyProvider);
+        return;
+      }
+      if (picked.startsWith('Gemini')) {
+        if (config.backend !== 'gemini' || !config.apiKey) {
+          void promptSecret({ header: 'Gemini API', question: 'Enter Gemini API key (GEMINI_API_KEY)', placeholder: 'AIza...' })
+            .then((apiKey) => {
+              if (!apiKey) { dispatch({ type: 'append', entry: { kind: 'error', text: 'Gemini API key cannot be empty.' } }); return; }
+              void fetchAndPickModel('gemini', GEMINI_DEFAULT_BASE_URL, apiKey, dispatch, applyProvider, { successText: (m) => `provider set to Gemini · model ${m}` });
+            })
+            .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'Gemini setup cancelled.' } }); });
+          return;
+        }
+        void fetchAndPickModel('gemini', GEMINI_DEFAULT_BASE_URL, config.apiKey, dispatch, applyProvider);
+        return;
+      }
+      if (picked.startsWith('Claude')) {
+        if (config.backend !== 'anthropic' || !config.apiKey) {
+          void promptSecret({ header: 'Claude API', question: 'Enter Anthropic API key (ANTHROPIC_API_KEY)', placeholder: 'sk-ant-...' })
+            .then((apiKey) => {
+              if (!apiKey) { dispatch({ type: 'append', entry: { kind: 'error', text: 'Anthropic API key cannot be empty.' } }); return; }
+              void fetchAndPickModel('anthropic', ANTHROPIC_DEFAULT_BASE_URL, apiKey, dispatch, applyProvider, { successText: (m) => `provider set to Claude · model ${m}` });
+            })
+            .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'Claude setup cancelled.' } }); });
+          return;
+        }
+        void fetchAndPickModel('anthropic', ANTHROPIC_DEFAULT_BASE_URL, config.apiKey, dispatch, applyProvider);
+        return;
+      }
+      if (picked.startsWith('OpenRouter')) {
+        if (config.backend !== 'openrouter' || !config.apiKey) {
+          void promptSecret({ header: 'OpenRouter', question: 'Enter OpenRouter API key (OPENROUTER_API_KEY)', placeholder: 'sk-or-...' })
+            .then((apiKey) => {
+              if (!apiKey) { dispatch({ type: 'append', entry: { kind: 'error', text: 'OpenRouter API key cannot be empty.' } }); return; }
+              void fetchAndPickModel('openrouter', OPENROUTER_DEFAULT_BASE_URL, apiKey, dispatch, applyProvider, { successText: (m) => `provider set to OpenRouter · model ${m}` });
+            })
+            .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'OpenRouter setup cancelled.' } }); });
+          return;
+        }
+        void fetchAndPickModel('openrouter', OPENROUTER_DEFAULT_BASE_URL, config.apiKey, dispatch, applyProvider);
+        return;
+      }
+      if (picked.startsWith('DeepSeek')) {
+        if (config.backend !== 'deepseek' || !config.apiKey) {
+          void promptSecret({ header: 'DeepSeek', question: 'Enter DeepSeek API key (DEEPSEEK_API_KEY)', placeholder: 'sk-...' })
+            .then((apiKey) => {
+              if (!apiKey) { dispatch({ type: 'append', entry: { kind: 'error', text: 'DeepSeek API key cannot be empty.' } }); return; }
+              void fetchAndPickModel('deepseek', DEEPSEEK_DEFAULT_BASE_URL, apiKey, dispatch, applyProvider, { successText: (m) => `provider set to DeepSeek · model ${m}` });
+            })
+            .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'DeepSeek setup cancelled.' } }); });
+          return;
+        }
+        void fetchAndPickModel('deepseek', DEEPSEEK_DEFAULT_BASE_URL, config.apiKey, dispatch, applyProvider);
+        return;
+      }
+      if (picked === '+ Add custom provider...') {
+        void promptSecret({ header: 'Custom provider', question: 'Provider name', placeholder: 'my-provider', masked: false })
+          .then((name) => {
+            if (!name) { dispatch({ type: 'append', entry: { kind: 'error', text: 'Provider name cannot be empty.' } }); return; }
+            void promptSecret({ header: name, question: 'Base URL', placeholder: 'https://api.example.com/v1', masked: false, defaultValue: 'https://opencode.ai/zen/v1' })
+              .then((baseURL) => {
+                if (!baseURL) { dispatch({ type: 'append', entry: { kind: 'error', text: 'Base URL cannot be empty.' } }); return; }
+                void promptSecret({ header: name, question: 'API key', placeholder: 'sk-...', defaultValue: 'public' })
+                  .then((apiKey) => {
+                    if (!apiKey) { dispatch({ type: 'append', entry: { kind: 'error', text: 'API key cannot be empty.' } }); return; }
+                    void fetchAndPickModel('openai-compat', baseURL, apiKey, dispatch, applyProvider, {
+                      successText: (m) => `provider "${name}" saved · model ${m}`,
+                      customProvider: { name, base_url: baseURL, api_key: apiKey },
+                    });
+                  })
+                  .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'Custom provider setup cancelled.' } }); });
+              })
+              .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'Custom provider setup cancelled.' } }); });
+          })
+          .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'Custom provider setup cancelled.' } }); });
+        return;
+      }
+      const customIdx = customNames.indexOf(picked.replace(/ \(current\)$/, ''));
+      if (customIdx >= 0) {
+        const cp = config.customProviders[customIdx];
+        if (!cp) return;
+        void fetchAndPickModel('openai-compat', cp.base_url, cp.api_key, dispatch, applyProvider, {
+          successText: (m) => `provider "${cp.name}" · model ${m}`,
         });
         return;
       }
-      if (backend === 'kimi' && (config.backend !== 'kimi' || !config.apiKey)) {
-        void promptSecret({
-          header: 'Kimi API',
-          question: 'Enter Kimi API key (MOONSHOT_API_KEY)',
-          placeholder: 'sk-...',
-        })
-          .then((apiKey) => {
-            if (!apiKey) {
-              dispatch({
-                type: 'append',
-                entry: { kind: 'error', text: 'Kimi API key cannot be empty.' },
-              });
-              return;
-            }
-            void fetchAndPickModel(
-              backend,
-              config.backend === 'kimi'
-                ? config.baseURL || KIMI_DEFAULT_BASE_URL
-                : KIMI_DEFAULT_BASE_URL,
-              apiKey,
-              dispatch,
-              applyProvider,
-              { successText: (picked) => `provider set to Kimi · model ${picked}` },
-            );
-          })
-          .catch(() => {
-            dispatch({
-              type: 'append',
-              entry: { kind: 'system', text: 'Kimi setup cancelled.' },
-            });
-          });
-        return;
+      if (picked.startsWith('OpenAI-compatible')) {
+        if (config.backend !== 'openai-compat' || !config.baseURL || !config.apiKey) {
+          void promptSecret({ header: 'OpenAI-compatible', question: 'Enter base URL', placeholder: 'https://api.example.com/v1', masked: false, defaultValue: 'https://opencode.ai/zen/v1' })
+            .then((baseURL) => {
+              if (!baseURL) { dispatch({ type: 'append', entry: { kind: 'error', text: 'Base URL cannot be empty.' } }); return; }
+              void promptSecret({ header: 'OpenAI-compatible', question: 'Enter API key', placeholder: 'sk-...', defaultValue: 'public' })
+                .then((apiKey) => {
+                  if (!apiKey) { dispatch({ type: 'append', entry: { kind: 'error', text: 'API key cannot be empty.' } }); return; }
+                  void fetchAndPickModel('openai-compat', baseURL, apiKey, dispatch, applyProvider, { successText: (m) => `provider set to OpenAI-compatible · model ${m}` });
+                })
+                .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'OpenAI-compatible setup cancelled.' } }); });
+            })
+            .catch(() => { dispatch({ type: 'append', entry: { kind: 'system', text: 'OpenAI-compatible setup cancelled.' } }); });
+          return;
+        }
+        void fetchAndPickModel('openai-compat', config.baseURL, config.apiKey, dispatch, applyProvider);
       }
-      if (backend === 'groq' && (config.backend !== 'groq' || !config.apiKey)) {
-        void promptSecret({
-          header: 'Groq API',
-          question: 'Enter Groq API key (GROQ_API_KEY)',
-          placeholder: 'gsk_...',
-        })
-          .then((apiKey) => {
-            if (!apiKey) {
-              dispatch({
-                type: 'append',
-                entry: { kind: 'error', text: 'Groq API key cannot be empty.' },
-              });
-              return;
-            }
-            void fetchAndPickModel(
-              backend,
-              GROQ_DEFAULT_BASE_URL,
-              apiKey,
-              dispatch,
-              applyProvider,
-              { successText: (picked) => `provider set to Groq · model ${picked}` },
-            );
-          })
-          .catch(() => {
-            dispatch({
-              type: 'append',
-              entry: { kind: 'system', text: 'Groq setup cancelled.' },
-            });
-          });
-        return;
-      }
-      if (backend === 'gemini' && (config.backend !== 'gemini' || !config.apiKey)) {
-        void promptSecret({
-          header: 'Gemini API',
-          question: 'Enter Gemini API key (GEMINI_API_KEY)',
-          placeholder: 'AIza...',
-        })
-          .then((apiKey) => {
-            if (!apiKey) {
-              dispatch({
-                type: 'append',
-                entry: { kind: 'error', text: 'Gemini API key cannot be empty.' },
-              });
-              return;
-            }
-            void fetchAndPickModel(
-              backend,
-              GEMINI_DEFAULT_BASE_URL,
-              apiKey,
-              dispatch,
-              applyProvider,
-              { successText: (picked) => `provider set to Gemini · model ${picked}` },
-            );
-          })
-          .catch(() => {
-            dispatch({
-              type: 'append',
-              entry: { kind: 'system', text: 'Gemini setup cancelled.' },
-            });
-          });
-        return;
-      }
-      if (backend === 'openrouter' && (config.backend !== 'openrouter' || !config.apiKey)) {
-        void promptSecret({
-          header: 'OpenRouter',
-          question: 'Enter OpenRouter API key (OPENROUTER_API_KEY)',
-          placeholder: 'sk-or-...',
-        })
-          .then((apiKey) => {
-            if (!apiKey) {
-              dispatch({
-                type: 'append',
-                entry: { kind: 'error', text: 'OpenRouter API key cannot be empty.' },
-              });
-              return;
-            }
-            void fetchAndPickModel(
-              backend,
-              OPENROUTER_DEFAULT_BASE_URL,
-              apiKey,
-              dispatch,
-              applyProvider,
-              { successText: (picked) => `provider set to OpenRouter · model ${picked}` },
-            );
-          })
-          .catch(() => {
-            dispatch({
-              type: 'append',
-              entry: { kind: 'system', text: 'OpenRouter setup cancelled.' },
-            });
-          });
-        return;
-      }
-      if (backend === 'deepseek' && (config.backend !== 'deepseek' || !config.apiKey)) {
-        void promptSecret({
-          header: 'DeepSeek',
-          question: 'Enter DeepSeek API key (DEEPSEEK_API_KEY)',
-          placeholder: 'sk-...',
-        })
-          .then((apiKey) => {
-            if (!apiKey) {
-              dispatch({
-                type: 'append',
-                entry: { kind: 'error', text: 'DeepSeek API key cannot be empty.' },
-              });
-              return;
-            }
-            void fetchAndPickModel(
-              backend,
-              DEEPSEEK_DEFAULT_BASE_URL,
-              apiKey,
-              dispatch,
-              applyProvider,
-              { successText: (picked) => `provider set to DeepSeek · model ${picked}` },
-            );
-          })
-          .catch(() => {
-            dispatch({
-              type: 'append',
-              entry: { kind: 'system', text: 'DeepSeek setup cancelled.' },
-            });
-          });
-        return;
-      }
-      if (backend === 'anthropic' && (config.backend !== 'anthropic' || !config.apiKey)) {
-        void promptSecret({
-          header: 'Claude API',
-          question: 'Enter Anthropic API key (ANTHROPIC_API_KEY)',
-          placeholder: 'sk-ant-...',
-        })
-          .then((apiKey) => {
-            if (!apiKey) {
-              dispatch({
-                type: 'append',
-                entry: { kind: 'error', text: 'Anthropic API key cannot be empty.' },
-              });
-              return;
-            }
-            void fetchAndPickModel(
-              backend,
-              ANTHROPIC_DEFAULT_BASE_URL,
-              apiKey,
-              dispatch,
-              applyProvider,
-              { successText: (picked) => `provider set to Claude · model ${picked}` },
-            );
-          })
-          .catch(() => {
-            dispatch({
-              type: 'append',
-              entry: { kind: 'system', text: 'Claude setup cancelled.' },
-            });
-          });
-        return;
-      }
-      const baseURL =
-        backend === 'openai-compat'
-          ? config.baseURL
-          : backend === 'kimi'
-            ? config.backend === 'kimi'
-              ? config.baseURL || KIMI_DEFAULT_BASE_URL
-              : KIMI_DEFAULT_BASE_URL
-            : backend === 'groq'
-              ? config.backend === 'groq'
-                ? config.baseURL || GROQ_DEFAULT_BASE_URL
-                : GROQ_DEFAULT_BASE_URL
-              : backend === 'gemini'
-                ? config.backend === 'gemini'
-                  ? config.baseURL || GEMINI_DEFAULT_BASE_URL
-                  : GEMINI_DEFAULT_BASE_URL
-                : backend === 'openrouter'
-                  ? config.backend === 'openrouter'
-                    ? config.baseURL || OPENROUTER_DEFAULT_BASE_URL
-                    : OPENROUTER_DEFAULT_BASE_URL
-                  : backend === 'deepseek'
-                    ? config.backend === 'deepseek'
-                      ? config.baseURL || DEEPSEEK_DEFAULT_BASE_URL
-                      : DEEPSEEK_DEFAULT_BASE_URL
-                    : backend === 'anthropic'
-                      ? config.backend === 'anthropic'
-                        ? config.baseURL || ANTHROPIC_DEFAULT_BASE_URL
-                        : ANTHROPIC_DEFAULT_BASE_URL
-                      : '';
-      const apiKey = backend === 'openai-compat' || config.backend === backend ? config.apiKey : '';
-      void fetchAndPickModel(backend, baseURL, apiKey, dispatch, applyProvider);
     },
     reject: () => dispatch({ type: 'set-ask', req: null }),
   };
@@ -2075,11 +1951,7 @@ function suggestClosest(input: string, known: string[]): string | undefined {
   return best && best.score >= 4 ? best.name : undefined;
 }
 
-/** Fetch the model list from the chosen backend and open the model picker.
- *  Caps the list to MODEL_PICKER_CAP entries so the modal stays readable;
- *  the user can always fall back to `/model <id>` for an unlisted model. */
-const MODEL_PICKER_CAP = 12;
-
+/** Fetch the model list from the chosen backend and open the model picker. */
 async function fetchAndPickModel(
   backend: Backend,
   baseURL: string,
@@ -2089,6 +1961,7 @@ async function fetchAndPickModel(
   opts?: {
     currentModel?: string;
     successText?: (picked: string) => string;
+    customProvider?: { name: string; base_url: string; api_key: string };
   },
 ): Promise<void> {
   let models: string[];
@@ -2117,20 +1990,18 @@ async function fetchAndPickModel(
     });
     return;
   }
-  const shown = allModels.slice(0, MODEL_PICKER_CAP);
-  const overflow = allModels.length - shown.length;
   const req: AskRequest = {
     question: {
       header: 'model',
-      question: `Select model for ${backendLabel(backend)}${overflow > 0 ? `  (showing ${shown.length} of ${allModels.length} — use /model <id> for unlisted)` : ''}:`,
-      options: shown.map((m) => ({
+      question: `Select model for ${backendLabel(backend)}:`,
+      options: allModels.map((m) => ({
         label: m,
         description: modelDescription(backend, m, currentModel),
       })),
     },
     resolve: (picked) => {
       dispatch({ type: 'set-ask', req: null });
-      void applyProvider({ backend, model: picked, baseURL, apiKey })
+      void applyProvider({ backend, model: picked, baseURL, apiKey, customProvider: opts?.customProvider })
         .then(() =>
           dispatch({
             type: 'append',
