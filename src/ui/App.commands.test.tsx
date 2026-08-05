@@ -61,7 +61,7 @@ function makeProps(overrides: Partial<AppProps> = {}): AppProps {
     agent,
     bannerData,
     parentSignal: new AbortController().signal,
-    readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+    readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model', customProviders: [] }),
     applyProvider,
     setYolo,
     ...overrides,
@@ -189,7 +189,7 @@ describe('UI slash commands (terminal integration)', () => {
 
   it('/provider can collect and test a Kimi API key before model selection', async () => {
     mounted = renderApp({
-      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model', customProviders: [] }),
     });
     await tick();
     await submit(mounted.stdin, '/provider');
@@ -228,6 +228,7 @@ describe('UI slash commands (terminal integration)', () => {
         baseURL: 'https://api.groq.com/openai/v1',
         apiKey: 'gsk-existing',
         model: 'openai/gpt-oss-20b',
+        customProviders: [],
       }),
     });
     await tick();
@@ -251,7 +252,7 @@ describe('UI slash commands (terminal integration)', () => {
 
   it('/provider can collect and test a Groq API key before model selection', async () => {
     mounted = renderApp({
-      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model', customProviders: [] }),
     });
     await tick();
     await submit(mounted.stdin, '/provider');
@@ -295,7 +296,7 @@ describe('UI slash commands (terminal integration)', () => {
       'models/gemini-flash-lite-latest',
     ]);
     mounted = renderApp({
-      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model', customProviders: [] }),
     });
     await tick();
     await submit(mounted.stdin, '/provider');
@@ -341,7 +342,7 @@ describe('UI slash commands (terminal integration)', () => {
   it('/provider can collect and test an OpenRouter API key before model selection', async () => {
     vi.mocked(listModels).mockResolvedValueOnce(['openrouter/auto', 'anthropic/claude-sonnet-4.5']);
     mounted = renderApp({
-      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model', customProviders: [] }),
     });
     await tick();
     await submit(mounted.stdin, '/provider');
@@ -390,7 +391,7 @@ describe('UI slash commands (terminal integration)', () => {
   it('/provider can collect and test a DeepSeek API key before model selection', async () => {
     vi.mocked(listModels).mockResolvedValueOnce(['deepseek-v4-flash', 'deepseek-v4-pro']);
     mounted = renderApp({
-      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model' }),
+      readConfig: () => ({ backend: 'ollama', baseURL: '', apiKey: '', model: 'stub-model', customProviders: [] }),
     });
     await tick();
     await submit(mounted.stdin, '/provider');

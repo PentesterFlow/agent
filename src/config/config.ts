@@ -49,6 +49,13 @@ export type PluginConfig = z.infer<typeof PluginConfig>;
 const ToolingProfile = z.enum(['minimal', 'full']);
 export type ToolingProfile = z.infer<typeof ToolingProfile>;
 
+const CustomProvider = z.object({
+  name: z.string().min(1),
+  base_url: z.string().min(1),
+  api_key: z.string().default(''),
+});
+export type CustomProvider = z.infer<typeof CustomProvider>;
+
 /** Schema default for auto_compact_threshold. Exported so backend-specific
  *  overrides (e.g. large-context Kimi models) can detect "user is on the
  *  default" and size the threshold to the model's real context window. */
@@ -100,6 +107,7 @@ const ConfigSchema = z.object({
   // Undefined means the user hasn't been asked yet — the CLI triggers a
   // one-time first-run picker in that case and writes the answer back.
   tooling_profile: ToolingProfile.optional(),
+  custom_providers: z.array(CustomProvider).default([]),
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
