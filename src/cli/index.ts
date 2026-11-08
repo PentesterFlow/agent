@@ -1427,7 +1427,7 @@ API keys (hosted backends) — set via flag, /provider in the TUI, or env var:
 
 Backends: ollama · lmstudio · openai · openai-compat · kimi · groq ·
   openrouter · deepseek · gemini · anthropic · naraya · dahl
-  + OpenCode presets: xai · mistral · cerebras · togetherai · deepinfra ·
+  + OpenCode presets: xai · mistral · cerebras · togetherai · runcrate · deepinfra ·
   fireworks · baseten · nvidia · perplexity · cohere · alibaba · venice ·
   zenmux · kilo · llmgateway · opencode
 Custom gateways: /provider → "Custom OpenAI scheme" or "Custom Anthropic scheme"

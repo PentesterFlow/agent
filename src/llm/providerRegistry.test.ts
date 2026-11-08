@@ -48,4 +48,14 @@ describe('providerRegistry (OpenCode-aligned)', () => {
       expect(ids.has(need), `missing ${need}`).toBe(true);
     }
   });
+
+  it('registers Runcrate with its OpenAI-compatible endpoint and key', () => {
+    const runcrate = getOpenAISchemeProvider('runcrate');
+    expect(runcrate).toBeDefined();
+    expect(runcrate?.scheme).toBe('openai');
+    expect(runcrate?.baseURL).toBe('https://api.runcrate.ai/v1');
+    expect(runcrate?.envKeys).toEqual(['RUNCRATE_API_KEY']);
+    expect(runcrate?.models).toContain(runcrate?.defaultModel);
+    expect(BACKENDS).toContain('runcrate');
+  });
 });

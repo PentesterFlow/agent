@@ -29,6 +29,8 @@ All notable changes to this project are documented here. The format is based on
   concurrently (bounded); permission prompts stay serialized.
 - **LLM retry/backoff** — 429/5xx and connection drops with exponential backoff
   and `Retry-After` support (OpenAI-compatible clients).
+- **Runcrate backend** — `--backend runcrate` (OpenAI-compatible, `RUNCRATE_API_KEY`,
+  default base URL `https://api.runcrate.ai/v1`) with a curated list of open-weight models.
 
 ### Changed
 
