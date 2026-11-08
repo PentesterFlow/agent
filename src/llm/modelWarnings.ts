@@ -34,6 +34,7 @@ export function modelReliabilityWarning(backend: Backend, model: string): string
       'mistral',
       'cerebras',
       'togetherai',
+      'runcrate',
       'deepinfra',
       'fireworks',
       'baseten',
